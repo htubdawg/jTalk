@@ -1,0 +1,97 @@
+use jtalk::{
+    PHONE_SYMBOLS, PHONE_VARIANTS, Phone, Plan, Pronunciations, SongOptions, Voice, plan_song,
+    plan_speech, pronounce, render, write_wav,
+};
+
+#[test]
+fn musicxml_melisma_is_one_syllable_with_three_pitches() {
+    let plan = plan_song(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/stay-with-me.musicxml"
+        ),
+        &SongOptions::default(),
+        &Pronunciations::default(),
+    )
+    .unwrap();
+
+    let stay = &plan.cues[0];
+    assert_eq!(stay.text, "Stay");
+    assert!((stay.start - 0.3).abs() < 1e-8);
+    assert!((stay.end - 1.8).abs() < 1e-8);
+    assert!((plan.duration - 4.8).abs() < 1e-8);
+    let stay_phones: Vec<_> = plan
+        .phones
+        .iter()
+        .filter(|phone| phone.start < stay.end - 1e-8)
+        .map(|phone| phone.symbol.as_str())
+        .collect();
+    assert_eq!(stay_phones, ["S", "T", "EY"]);
+    for (seconds, expected_hz) in [(0.3, 261.626), (0.9, 293.665), (1.2, 329.628)] {
+        assert!(plan.pitch.iter().any(|target| {
+            (target.time - seconds).abs() < 1e-8 && (target.hz - expected_hz).abs() < 0.001
+        }));
+    }
+
+    let audio = render(&plan, Voice::robot(), 16_000).unwrap();
+    assert_eq!(audio.samples.len(), 76_800);
+    assert!(audio.samples[..4800].iter().all(|sample| *sample == 0.0));
+    for (seconds, hz) in [(0.65, 261.626), (1.0, 293.665), (1.4, 329.628)] {
+        let start = (seconds * 16_000.0) as usize;
+        let period = (16_000.0_f64 / hz).round() as usize;
+        let error: f32 = (start..start + 800)
+            .map(|i| (audio.samples[i] - audio.samples[i + period]).powi(2))
+            .sum();
+        let power: f32 = audio.samples[start..start + 800]
+            .iter()
+            .map(|value| value * value)
+            .sum();
+        assert!(power > 0.01 && error < power * 0.1, "{hz} Hz");
+    }
+}
+
+#[test]
+fn dialogue_uses_a_pronunciation_override_and_writes_pcm() {
+    let mut custom = Pronunciations::default();
+    custom.insert("jtalk", "JH EY1 T AO1 K").unwrap();
+    assert_eq!(
+        pronounce("jTalk", &custom).unwrap(),
+        ["JH", "EY", "T", "AO", "K"]
+    );
+    let voice = Voice::default();
+    let plan = plan_speech("Can you hear jTalk?", voice, 1.0, &custom).unwrap();
+    assert_eq!(plan.cues.last().unwrap().text, "jTalk");
+    let last_two = &plan.pitch[plan.pitch.len() - 2..];
+    assert!(last_two[1].hz > last_two[0].hz);
+
+    let audio = render(&plan, voice, 24_000).unwrap();
+    assert_eq!(audio.cues, plan.cues);
+    assert!(audio.samples.iter().any(|sample| sample.abs() > 0.02));
+    let mut wav = Vec::new();
+    write_wav(&audio, &mut wav).unwrap();
+    assert_eq!(&wav[..4], b"RIFF");
+    assert_eq!(&wav[8..12], b"WAVE");
+    assert_eq!(wav.len(), 44 + 2 * audio.samples.len());
+}
+
+#[test]
+fn each_reference_phone_can_be_rendered() {
+    assert_eq!(PHONE_SYMBOLS.len(), 44);
+    for &symbol in PHONE_SYMBOLS.iter().chain(PHONE_VARIANTS) {
+        let plan = Plan {
+            phones: vec![Phone {
+                symbol: symbol.to_owned(),
+                start: 0.0,
+                end: 0.12,
+            }],
+            duration: 0.12,
+            ..Plan::default()
+        };
+        let audio = render(&plan, Voice::default(), 16_000).unwrap();
+        assert!(audio.samples.iter().all(|sample| sample.is_finite()));
+        assert!(
+            audio.samples.iter().any(|sample| sample.abs() > 0.01),
+            "{symbol}"
+        );
+    }
+}

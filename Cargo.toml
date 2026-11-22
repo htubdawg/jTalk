@@ -1,0 +1,11 @@
+[package]
+name = "jtalk"
+version = "0.1.0"
+edition = "2024"
+description = "Procedural English speech and MusicXML singing synthesizer"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+flate2 = "1"
+roxmltree = "0.20"
+zip = { version = "2", default-features = false, features = ["deflate"] }
