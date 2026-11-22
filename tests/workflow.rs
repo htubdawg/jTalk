@@ -1,6 +1,6 @@
 use jtalk::{
     PHONE_SYMBOLS, PHONE_VARIANTS, Phone, Plan, Pronunciations, SongOptions, Voice, plan_song,
-    plan_speech, pronounce, render, song_lines, write_wav,
+    plan_speech, pronounce, render, render_singing, song_lines, write_wav,
 };
 
 #[test]
@@ -34,9 +34,24 @@ fn musicxml_melisma_is_one_syllable_with_three_pitches() {
         }));
     }
 
-    let audio = render(&plan, Voice::robot(), 16_000).unwrap();
+    let audio = render_singing(&plan, Voice::robot(), 16_000).unwrap();
     assert_eq!(audio.samples.len(), 76_800);
     assert!(audio.samples[..4800].iter().all(|sample| *sample == 0.0));
+    let vowel = &audio.samples[9120..12960];
+    let harmonic = |hz: f64| {
+        let (sin, cos) = vowel
+            .iter()
+            .enumerate()
+            .fold((0.0, 0.0), |(sin, cos), (i, sample)| {
+                let angle = std::f64::consts::TAU * hz * i as f64 / 16_000.0;
+                let window =
+                    0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / vowel.len() as f64).cos();
+                let value = f64::from(*sample) * window;
+                (sin + value * angle.sin(), cos + value * angle.cos())
+            });
+        sin * sin + cos * cos
+    };
+    assert!(harmonic(523.251) > 1.8 * harmonic(261.626));
     for (seconds, hz) in [(0.65, 261.626), (1.0, 293.665), (1.4, 329.628)] {
         let start = (seconds * 16_000.0) as usize;
         let period = (16_000.0_f64 / hz).round() as usize;
@@ -154,7 +169,7 @@ fn sung_with_has_a_voiced_dental_without_strong_high_frequency_ripple() {
         .unwrap();
     assert_eq!(with.text, "with");
     assert!((dental.end - with.end).abs() < 1e-8);
-    let audio = render(&plan, Voice::robot(), 48_000).unwrap();
+    let audio = render_singing(&plan, Voice::robot(), 48_000).unwrap();
     let start = ((dental.start + 0.005) * 48_000.0).round() as usize;
     let end = ((dental.end - 0.010) * 48_000.0).round() as usize;
     let samples = &audio.samples[start..end];

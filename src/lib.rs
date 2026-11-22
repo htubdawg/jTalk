@@ -7,7 +7,7 @@ mod synth;
 
 pub use english::{Pronunciations, plan_speech, pronounce};
 pub use musicxml::{SongLine, SongOptions, plan_song, song_lines};
-pub use synth::{Audio, Voice, render, write_wav};
+pub use synth::{Audio, Voice, render, render_singing, write_wav};
 
 use std::error::Error;
 use std::io;

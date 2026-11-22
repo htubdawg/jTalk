@@ -24,7 +24,19 @@ seeded white noise and passes through a one-pole low-pass at 1.4 kHz, using
 smoothed signal is scaled by the glottal pulse and `Voice::breath`. That
 concentrates the airflow in the open part of the cycle and keeps it out of
 the dry component. The CLI and library default to 0.035. The browser and Windows app start
-at 73% in their Default presets. The robot preset uses zero.
+at 73% for dialogue. The Windows app starts MusicXML vocals at 22%
+and remembers each mode’s setting while the app is open. The robot preset
+uses zero.
+
+### Singing voice
+
+MusicXML rendering uses `render_singing`. It reduces the dry glottal
+mix from 0.16 to 0.025, rolls off low frequencies in the voiced source,
+and blends in the first difference of the pulse before the formant
+filters. The shorter closing phase and the differentiated component
+excite upper harmonics. Wider, stronger formants let those harmonics
+carry the vowel through pitch changes. The singing path also halves
+the glottal breath contribution at the same Breath setting.
 
 ### Consonant turbulence
 
@@ -41,10 +53,10 @@ voice's formant scale.
 
 | Sound | Noise center | Bandwidth | Noise gain | Voicing gain |
 | --- | ---: | ---: | ---: | ---: |
-| S | 4,750 Hz | 1,100 Hz | 0.28 | 0 |
-| T | 3,550 Hz | 1,200 Hz | 0.34 | 0 |
-| TH | 2,650 Hz | 1,200 Hz | 0.16 | 0 |
-| DH | 2,250 Hz | 1,100 Hz | 0.09 | 0.52 |
+| S | 4,750 Hz | 1,100 Hz | 0.135 | 0 |
+| T | 3,550 Hz | 1,200 Hz | 0.25 | 0 |
+| TH | 2,650 Hz | 1,200 Hz | 0.115 | 0 |
+| DH | 2,250 Hz | 1,100 Hz | 0.065 | 0.52 |
 
 These are jTalk tuning values at a formant scale of 1.0. The higher center
 frequency on S keeps it distinct from the dental fricatives. DH gets most
@@ -93,6 +105,12 @@ cargo run --release -- speak "Stay with me. Can you hear me? The weather is clea
 
 The vowel window at 0.160–0.220 s was sample-for-sample identical.
 The same Hann-window and FFT comparison was used for both passes.
+
+Compared with `3e92800`, the current mix reduces energy between
+2.5 and 6 kHz by 5.2 dB in the full reference dialogue at 73% breath.
+For the first sustained vowel in the example vocal, the fundamental
+is 10.2 dB lower relative to its upper harmonics. That comparison
+uses the same 73% breath setting for both vocal renders.
 
 ## References
 

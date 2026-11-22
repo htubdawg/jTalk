@@ -14,7 +14,7 @@ and 73% breath in the Default preset.
 
 For singing, drop a MusicXML or MXL file onto the Windows app or select
 **Open score…**. Choose a vocal line if the score has multiple parts or verses
-with lyrics, then select **Render & Play**. The score supplies pitch and timing.
+with lyrics, then select **Render & Play**. The score supplies pitch and timing. The Default preset starts vocals at 22% breath.
 Select **Use dialogue** to return to the text you were editing.
 
 To build it from source on Windows, run `cargo build --release --bin jtalk-desktop`.
@@ -90,7 +90,7 @@ fn line() -> jtalk::Result<jtalk::Audio> {
 }
 ```
 
-Use `plan_song` to get the corresponding plan from a MusicXML file.
+Use `plan_song` and `render_singing` to render vocals from a MusicXML file.
 `write_wav` writes any rendered audio into a Rust `Write` destination.
 `PHONE_SYMBOLS` and `PHONE_VARIANTS` list the supported phone labels.
 

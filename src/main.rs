@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use jtalk::{
-    Pronunciations, Result, SongOptions, Voice, plan_song, plan_speech, render, write_wav,
+    Pronunciations, Result, SongOptions, Voice, plan_song, plan_speech, render, render_singing,
+    write_wav,
 };
 
 #[derive(Parser)]
@@ -123,28 +124,31 @@ fn run(cli: Cli) -> Result<()> {
         gain: settings.gain.unwrap_or(preset.gain),
     };
     let pronunciations = load_overrides(settings.pronunciations.as_deref())?;
-    let plan = match cli.command {
+    let audio = match cli.command {
         Command::Serve { bind } => return web::serve(bind, &pronunciations),
-        Command::Speak { text, speed } => plan_speech(&text, voice, speed, &pronunciations)?,
+        Command::Speak { text, speed } => {
+            let plan = plan_speech(&text, voice, speed, &pronunciations)?;
+            render(&plan, voice, settings.sample_rate)?
+        }
         Command::Sing {
             score,
             part,
             verse,
-            voice,
+            voice: score_voice,
             staff,
             bpm,
         } => {
             let options = SongOptions {
                 part,
                 verse,
-                voice,
+                voice: score_voice,
                 staff,
                 default_bpm: bpm,
             };
-            plan_song(score, &options, &pronunciations)?
+            let plan = plan_song(score, &options, &pronunciations)?;
+            render_singing(&plan, voice, settings.sample_rate)?
         }
     };
-    let audio = render(&plan, voice, settings.sample_rate)?;
     if settings.output == Path::new("-") {
         write_wav(&audio, BufWriter::new(io::stdout().lock()))
     } else {

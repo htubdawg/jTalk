@@ -8,8 +8,8 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread;
 
 use jtalk::{
-    Pronunciations, SongLine, SongOptions, Voice, plan_song, plan_speech, render, song_lines,
-    write_wav,
+    Pronunciations, SongLine, SongOptions, Voice, plan_song, plan_speech, render, render_singing,
+    song_lines, write_wav,
 };
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -45,6 +45,7 @@ const RENDER_TIMER: usize = 1;
 const TBM_GETPOS: u32 = WM_USER;
 const SAMPLE_RATE: u32 = 48_000;
 const DEFAULT_BREATH: i32 = 73;
+const SINGING_BREATH: i32 = 22;
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain([0]).collect()
@@ -102,6 +103,8 @@ struct App {
     open_button: HWND,
     dialogue_button: HWND,
     score: Option<Score>,
+    dialogue_breath: Option<i32>,
+    singing_breath: Option<i32>,
     preset: HWND,
     pitch: Slider,
     speed: Slider,
@@ -363,6 +366,11 @@ impl App {
         if let Some(name) = path.file_name() {
             set_text(self.score_name, &name.to_string_lossy().replace('&', "&&"));
         }
+        if self.score.is_none() && !self.is_robot() {
+            self.dialogue_breath = Some(self.breath.position());
+            self.breath
+                .set(self.singing_breath.unwrap_or(SINGING_BREATH));
+        }
         self.score = Some(Score { path, lines });
         self.clear_audio();
         self.update_input();
@@ -371,6 +379,11 @@ impl App {
     }
 
     fn use_dialogue(&mut self) {
+        if self.score.is_some() && !self.is_robot() {
+            self.singing_breath = Some(self.breath.position());
+            self.breath
+                .set(self.dialogue_breath.unwrap_or(DEFAULT_BREATH));
+        }
         self.score = None;
         self.clear_audio();
         self.update_input();
@@ -558,11 +571,16 @@ impl Drop for App {
 
 fn render_wav(input: Input, voice: Voice) -> jtalk::Result<Vec<u8>> {
     let pronunciations = Pronunciations::default();
-    let plan = match input {
-        Input::Dialogue { text, speed } => plan_speech(&text, voice, speed, &pronunciations)?,
-        Input::Score { path, options } => plan_song(path, &options, &pronunciations)?,
+    let audio = match input {
+        Input::Dialogue { text, speed } => {
+            let plan = plan_speech(&text, voice, speed, &pronunciations)?;
+            render(&plan, voice, SAMPLE_RATE)?
+        }
+        Input::Score { path, options } => {
+            let plan = plan_song(path, &options, &pronunciations)?;
+            render_singing(&plan, voice, SAMPLE_RATE)?
+        }
     };
-    let audio = render(&plan, voice, SAMPLE_RATE)?;
     let mut wav = Vec::new();
     write_wav(&audio, &mut wav)?;
     Ok(wav)
@@ -711,8 +729,14 @@ unsafe extern "system" fn window_proc(
                     let notification = ((wparam >> 16) & 0xffff) as u32;
                     match id {
                         PRESET if notification == CBN_SELCHANGE => {
-                            app.breath
-                                .set(if app.is_robot() { 0 } else { DEFAULT_BREATH });
+                            let breath = if app.is_robot() {
+                                0
+                            } else if app.score.is_some() {
+                                app.singing_breath.unwrap_or(SINGING_BREATH)
+                            } else {
+                                app.dialogue_breath.unwrap_or(DEFAULT_BREATH)
+                            };
+                            app.breath.set(breath);
                             app.update_sliders();
                         }
                         OPEN_SCORE if notification == BN_CLICKED && app.task.is_none() => {
