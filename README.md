@@ -4,6 +4,14 @@ jTalk is a procedural English voice synthesizer written in Rust. It renders NPC
 dialogue from text and robotic vocals from a MusicXML score with embedded
 lyrics. Both use the same formant renderer and work offline.
 
+## Windows desktop app
+
+Extract the portable Windows ZIP and double-click **jTalk.exe**. Type a line,
+adjust the voice, then select **Render & Play**. Use **Save WAV…** to keep the
+result. The desktop app renders dialogue directly in the window.
+
+To build it from source on Windows, run `cargo build --release --bin jtalk-desktop`.
+
 ## Try it
 
 ```sh
