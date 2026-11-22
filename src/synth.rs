@@ -9,6 +9,7 @@ use crate::{Cue, PHONE_SYMBOLS, PHONE_VARIANTS, Plan, Result, invalid};
 pub struct Voice {
     pub speech_hz: f64,
     pub formant_scale: f64,
+    /// Glottal breathiness, independent of consonant turbulence.
     pub breath: f64,
     pub jitter_cents: f64,
     pub vibrato_cents: f64,
@@ -21,7 +22,7 @@ impl Default for Voice {
         Self {
             speech_hz: 135.0,
             formant_scale: 1.0,
-            breath: 0.08,
+            breath: 0.035,
             jitter_cents: 3.0,
             vibrato_cents: 0.0,
             vibrato_hz: 5.0,
@@ -50,7 +51,7 @@ pub struct Audio {
 #[derive(Clone, Copy)]
 enum NoiseEnvelope {
     Steady,
-    Ramped,
+    Affricate,
     StopRelease,
 }
 
@@ -102,7 +103,7 @@ fn profile(symbol: &str) -> Profile {
 }
 
 fn consonant(symbol: &str) -> Profile {
-    use NoiseEnvelope::{Ramped, Steady, StopRelease};
+    use NoiseEnvelope::{Affricate, Steady, StopRelease};
 
     // Voicing, turbulence and release vary independently by manner of articulation.
     let (first, voice, noise, band, noise_envelope) = match symbol {
@@ -113,23 +114,23 @@ fn consonant(symbol: &str) -> Profile {
         "R" => ([320., 1300., 1640.], 0.76, 0.0, 0., Steady),
         "W" => ([290., 750., 2400.], 0.76, 0.0, 0., Steady),
         "Y" => ([280., 2260., 3000.], 0.76, 0.0, 0., Steady),
-        "B" => ([230., 900., 2300.], 0.22, 0.30, 1050., Ramped),
-        "D" => ([230., 1750., 2700.], 0.22, 0.38, 3750., Ramped),
-        "G" => ([230., 1950., 2450.], 0.22, 0.35, 2200., Ramped),
-        "P" => ([300., 900., 2300.], 0.0, 0.42, 1050., Ramped),
+        "B" => ([230., 900., 2300.], 0.22, 0.23, 1050., StopRelease),
+        "D" => ([230., 1750., 2700.], 0.22, 0.24, 3300., StopRelease),
+        "G" => ([230., 1950., 2450.], 0.22, 0.24, 2200., StopRelease),
+        "P" => ([300., 900., 2300.], 0.0, 0.30, 1050., StopRelease),
         "T" => ([300., 1750., 2700.], 0.0, 0.40, 3950., StopRelease),
-        "K" => ([300., 1950., 2450.], 0.0, 0.52, 2450., Ramped),
-        "CH" => ([300., 1750., 2600.], 0.0, 0.86, 3200., Ramped),
-        "JH" => ([280., 1750., 2600.], 0.26, 0.78, 3000., Ramped),
-        "F" => ([350., 1150., 2450.], 0.0, 0.39, 3000., Steady),
-        "V" => ([340., 1150., 2450.], 0.36, 0.36, 2900., Steady),
-        "TH" => ([350., 1450., 2600.], 0.0, 0.35, 4700., Steady),
-        "DH" => ([350., 1450., 2600.], 0.38, 0.30, 4200., Steady),
-        "HH" => ([400., 1450., 2500.], 0.0, 0.31, 1500., Steady),
+        "K" => ([300., 1950., 2450.], 0.0, 0.34, 2450., StopRelease),
+        "CH" => ([300., 1750., 2600.], 0.0, 0.40, 3200., Affricate),
+        "JH" => ([280., 1750., 2600.], 0.26, 0.33, 3000., Affricate),
+        "F" => ([350., 1150., 2450.], 0.0, 0.23, 2500., Steady),
+        "V" => ([340., 1150., 2450.], 0.42, 0.15, 2400., Steady),
+        "TH" => ([350., 1450., 2600.], 0.0, 0.16, 2650., Steady),
+        "DH" => ([350., 1450., 2600.], 0.52, 0.09, 2250., Steady),
+        "HH" => ([400., 1450., 2500.], 0.0, 0.17, 1350., Steady),
         "S" => ([350., 1850., 2900.], 0.0, 0.30, 5300., Steady),
-        "Z" => ([350., 1850., 2900.], 0.32, 0.75, 5700., Steady),
-        "SH" => ([350., 1650., 2450.], 0.0, 0.86, 3250., Steady),
-        "ZH" => ([350., 1650., 2450.], 0.35, 0.72, 3050., Steady),
+        "Z" => ([350., 1850., 2900.], 0.39, 0.30, 4900., Steady),
+        "SH" => ([350., 1650., 2450.], 0.0, 0.35, 3250., Steady),
+        "ZH" => ([350., 1650., 2450.], 0.41, 0.26, 3050., Steady),
         _ => unreachable!("validated phone"),
     };
     Profile {
@@ -139,8 +140,8 @@ fn consonant(symbol: &str) -> Profile {
         noise,
         band,
         noise_width: match symbol {
-            "S" => 1100.0,
-            "T" => 1200.0,
+            "S" | "Z" | "DH" => 1100.0,
+            "TH" | "T" => 1200.0,
             _ => 1750.0,
         },
         noise_envelope,
@@ -257,6 +258,10 @@ pub fn render(plan: &Plan, voice: Voice, sample_rate: u32) -> Result<Audio> {
         Resonator::default(),
         Resonator::default(),
     ];
+    let mut breath = 0.0;
+    let breath_smoothing = 1.0 - (-TAU * 1400.0 / rate).exp();
+    // Fixed-width filters admit a smaller fraction of white noise at higher rates.
+    let noise_gain = 1.8 * (rate / 48_000.0).sqrt();
     let mut pitch_index = 0;
     let f0 = |time: f64, index: &mut usize| {
         let Some(first) = plan.pitch.first() else {
@@ -293,6 +298,7 @@ pub fn render(plan: &Plan, voice: Voice, sample_rate: u32) -> Result<Audio> {
             formants
                 .iter_mut()
                 .for_each(|state| *state = Resonator::default());
+            breath = 0.0;
         }
         // Consonants have separate noise sources. A preceding fricative
         // should not leave filter energy behind a stop closure.
@@ -325,7 +331,10 @@ pub fn render(plan: &Plan, voice: Voice, sample_rate: u32) -> Result<Audio> {
                 0.0
             };
             let white = random();
-            let source = pulse - 0.315 + white * voice.breath;
+            breath += breath_smoothing * (white - breath);
+            let source = pulse - 0.315;
+            // Breath follows glottal opening and goes through the vocal tract.
+            let tract_source = source + breath * pulse * voice.breath;
             let mut voiced = source * 0.16;
             for (band, filter) in formants.iter_mut().enumerate() {
                 let target = lerp(shape.first[band], shape.last[band], tail);
@@ -341,7 +350,7 @@ pub fn render(plan: &Plan, voice: Voice, sample_rate: u32) -> Result<Audio> {
                 }
                 voiced += [1.3, 1.1, 0.72][band]
                     * filter.next(
-                        source,
+                        tract_source,
                         center * voice.formant_scale,
                         [80., 120., 165.][band],
                         rate,
@@ -350,21 +359,23 @@ pub fn render(plan: &Plan, voice: Voice, sample_rate: u32) -> Result<Audio> {
 
             let attack = smooth(elapsed / 0.010_f64.min(duration * 0.27));
             let release = smooth(remaining / 0.014_f64.min(duration * 0.27));
-            let vocal_attack = if previous.is_some_and(|p| p.voice > 0.4) && shape.voice > 0.4 {
-                1.0
-            } else {
-                attack
-            };
-            let vocal_release = if next.is_some_and(|p| p.voice > 0.4) && shape.voice > 0.4 {
-                1.0
-            } else {
-                release
-            };
+            let mut voicing = shape.voice;
+            if shape.voice > 0.0 {
+                // Share the same midpoint at neighbouring voiced boundaries.
+                let attack_floor = previous
+                    .filter(|p| p.voice > 0.0)
+                    .map_or(0.0, |p| (p.voice + shape.voice) * 0.5);
+                let release_floor = next
+                    .filter(|p| p.voice > 0.0)
+                    .map_or(0.0, |p| (p.voice + shape.voice) * 0.5);
+                voicing += (1.0 - attack) * (attack_floor - shape.voice)
+                    + (1.0 - release) * (release_floor - shape.voice);
+            }
             let mut noise = 0.0;
             if shape.noise > 0.0 {
                 let envelope = match shape.noise_envelope {
                     NoiseEnvelope::Steady => attack * release,
-                    NoiseEnvelope::Ramped => {
+                    NoiseEnvelope::Affricate => {
                         attack * release * smooth((elapsed / duration - 0.48) / 0.18)
                     }
                     NoiseEnvelope::StopRelease => {
@@ -376,7 +387,7 @@ pub fn render(plan: &Plan, voice: Voice, sample_rate: u32) -> Result<Audio> {
                 };
                 noise = shape.noise
                     * envelope
-                    * 1.8
+                    * noise_gain
                     * turbulence.next(
                         white,
                         shape.band * voice.formant_scale,
@@ -384,7 +395,7 @@ pub fn render(plan: &Plan, voice: Voice, sample_rate: u32) -> Result<Audio> {
                         rate,
                     );
             }
-            let value = voice.gain * (shape.voice * voiced * vocal_attack * vocal_release + noise);
+            let value = voice.gain * (voicing * voiced + noise);
             *sample = value.clamp(-1.0, 1.0) as f32;
         }
     }

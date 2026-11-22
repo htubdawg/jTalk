@@ -133,3 +133,62 @@ fn stay_has_a_soft_s_and_a_short_t_release() {
         );
     }
 }
+
+#[test]
+fn sung_with_has_a_voiced_dental_without_strong_high_frequency_ripple() {
+    let plan = plan_song(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/stay-with-me.musicxml"
+        ),
+        &SongOptions::default(),
+        &Pronunciations::default(),
+    )
+    .unwrap();
+    let with = &plan.cues[1];
+    let dental = plan
+        .phones
+        .iter()
+        .find(|phone| phone.symbol == "DH")
+        .unwrap();
+    assert_eq!(with.text, "with");
+    assert!((dental.end - with.end).abs() < 1e-8);
+    let audio = render(&plan, Voice::robot(), 48_000).unwrap();
+    let start = ((dental.start + 0.005) * 48_000.0).round() as usize;
+    let end = ((dental.end - 0.010) * 48_000.0).round() as usize;
+    let samples = &audio.samples[start..end];
+    let power: f32 = samples.iter().map(|sample| sample.powi(2)).sum();
+    let ripple: f32 = samples
+        .windows(3)
+        .map(|w| (w[0] - 2.0 * w[1] + w[2]).powi(2))
+        .sum();
+    assert!(power / samples.len() as f32 > 0.002);
+    // A second difference strongly weights the high-frequency portion.
+    assert!(ripple / power < 0.003);
+}
+
+#[test]
+fn default_dialogue_breath_is_present_below_voicing() {
+    let voice = Voice::default();
+    let dry_voice = Voice {
+        breath: 0.0,
+        ..voice
+    };
+    let plan = plan_speech(
+        "Stay with me. Can you hear me?",
+        voice,
+        1.0,
+        &Pronunciations::default(),
+    )
+    .unwrap();
+    let wet = render(&plan, voice, 48_000).unwrap();
+    let dry = render(&plan, dry_voice, 48_000).unwrap();
+    let breath_power: f32 = wet
+        .samples
+        .iter()
+        .zip(&dry.samples)
+        .map(|(a, b)| (a - b).powi(2))
+        .sum();
+    let voice_power: f32 = dry.samples.iter().map(|sample| sample.powi(2)).sum();
+    assert!((1e-7..1e-4).contains(&(breath_power / voice_power)));
+}
