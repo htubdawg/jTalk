@@ -6,9 +6,10 @@ lyrics. Both use the same formant renderer and work offline.
 
 ## Windows desktop app
 
-Extract the portable Windows ZIP and double-click **jTalk.exe**. Type a line,
-adjust the voice, then select **Render & Play**. Use **Save WAV…** to keep the
-result. The desktop app renders dialogue directly in the window.
+Download the [portable Windows app](downloads/jTalk-Windows-x64.zip) for
+Windows 10 or 11 on x64. Extract the ZIP and double-click **jTalk.exe**. Type
+a line, adjust the voice, then select **Render & Play**. Use **Save WAV…** to
+keep the result.
 
 To build it from source on Windows, run `cargo build --release --bin jtalk-desktop`.
 
