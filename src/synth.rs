@@ -48,13 +48,21 @@ pub struct Audio {
 }
 
 #[derive(Clone, Copy)]
+enum NoiseEnvelope {
+    Steady,
+    Ramped,
+    StopRelease,
+}
+
+#[derive(Clone, Copy)]
 struct Profile {
     first: [f64; 3],
     last: [f64; 3],
     voice: f64,
     noise: f64,
     band: f64,
-    burst: bool,
+    noise_width: f64,
+    noise_envelope: NoiseEnvelope,
 }
 
 fn profile(symbol: &str) -> Profile {
@@ -88,37 +96,40 @@ fn profile(symbol: &str) -> Profile {
         voice: 1.0,
         noise: 0.0,
         band: 0.0,
-        burst: false,
+        noise_width: 0.0,
+        noise_envelope: NoiseEnvelope::Steady,
     }
 }
 
 fn consonant(symbol: &str) -> Profile {
+    use NoiseEnvelope::{Ramped, Steady, StopRelease};
+
     // Voicing, turbulence and release vary independently by manner of articulation.
-    let (first, voice, noise, band, burst) = match symbol {
-        "L" | "EL" => ([360., 1250., 2600.], 0.65, 0.0, 0., false),
-        "M" | "EM" => ([250., 1050., 2150.], 0.45, 0.0, 0., false),
-        "N" | "EN" => ([280., 1650., 2350.], 0.48, 0.0, 0., false),
-        "NG" => ([300., 2050., 2650.], 0.40, 0.0, 0., false),
-        "R" => ([320., 1300., 1640.], 0.76, 0.0, 0., false),
-        "W" => ([290., 750., 2400.], 0.76, 0.0, 0., false),
-        "Y" => ([280., 2260., 3000.], 0.76, 0.0, 0., false),
-        "B" => ([230., 900., 2300.], 0.22, 0.30, 1050., true),
-        "D" => ([230., 1750., 2700.], 0.22, 0.38, 3750., true),
-        "G" => ([230., 1950., 2450.], 0.22, 0.35, 2200., true),
-        "P" => ([300., 900., 2300.], 0.0, 0.42, 1050., true),
-        "T" => ([300., 1750., 2700.], 0.0, 0.55, 4400., true),
-        "K" => ([300., 1950., 2450.], 0.0, 0.52, 2450., true),
-        "CH" => ([300., 1750., 2600.], 0.0, 0.86, 3200., true),
-        "JH" => ([280., 1750., 2600.], 0.26, 0.78, 3000., true),
-        "F" => ([350., 1150., 2450.], 0.0, 0.39, 3000., false),
-        "V" => ([340., 1150., 2450.], 0.36, 0.36, 2900., false),
-        "TH" => ([350., 1450., 2600.], 0.0, 0.35, 4700., false),
-        "DH" => ([350., 1450., 2600.], 0.38, 0.30, 4200., false),
-        "HH" => ([400., 1450., 2500.], 0.0, 0.31, 1500., false),
-        "S" => ([350., 1850., 2900.], 0.0, 0.90, 6000., false),
-        "Z" => ([350., 1850., 2900.], 0.32, 0.75, 5700., false),
-        "SH" => ([350., 1650., 2450.], 0.0, 0.86, 3250., false),
-        "ZH" => ([350., 1650., 2450.], 0.35, 0.72, 3050., false),
+    let (first, voice, noise, band, noise_envelope) = match symbol {
+        "L" | "EL" => ([360., 1250., 2600.], 0.65, 0.0, 0., Steady),
+        "M" | "EM" => ([250., 1050., 2150.], 0.45, 0.0, 0., Steady),
+        "N" | "EN" => ([280., 1650., 2350.], 0.48, 0.0, 0., Steady),
+        "NG" => ([300., 2050., 2650.], 0.40, 0.0, 0., Steady),
+        "R" => ([320., 1300., 1640.], 0.76, 0.0, 0., Steady),
+        "W" => ([290., 750., 2400.], 0.76, 0.0, 0., Steady),
+        "Y" => ([280., 2260., 3000.], 0.76, 0.0, 0., Steady),
+        "B" => ([230., 900., 2300.], 0.22, 0.30, 1050., Ramped),
+        "D" => ([230., 1750., 2700.], 0.22, 0.38, 3750., Ramped),
+        "G" => ([230., 1950., 2450.], 0.22, 0.35, 2200., Ramped),
+        "P" => ([300., 900., 2300.], 0.0, 0.42, 1050., Ramped),
+        "T" => ([300., 1750., 2700.], 0.0, 0.40, 3950., StopRelease),
+        "K" => ([300., 1950., 2450.], 0.0, 0.52, 2450., Ramped),
+        "CH" => ([300., 1750., 2600.], 0.0, 0.86, 3200., Ramped),
+        "JH" => ([280., 1750., 2600.], 0.26, 0.78, 3000., Ramped),
+        "F" => ([350., 1150., 2450.], 0.0, 0.39, 3000., Steady),
+        "V" => ([340., 1150., 2450.], 0.36, 0.36, 2900., Steady),
+        "TH" => ([350., 1450., 2600.], 0.0, 0.35, 4700., Steady),
+        "DH" => ([350., 1450., 2600.], 0.38, 0.30, 4200., Steady),
+        "HH" => ([400., 1450., 2500.], 0.0, 0.31, 1500., Steady),
+        "S" => ([350., 1850., 2900.], 0.0, 0.30, 5300., Steady),
+        "Z" => ([350., 1850., 2900.], 0.32, 0.75, 5700., Steady),
+        "SH" => ([350., 1650., 2450.], 0.0, 0.86, 3250., Steady),
+        "ZH" => ([350., 1650., 2450.], 0.35, 0.72, 3050., Steady),
         _ => unreachable!("validated phone"),
     };
     Profile {
@@ -127,7 +138,12 @@ fn consonant(symbol: &str) -> Profile {
         voice,
         noise,
         band,
-        burst,
+        noise_width: match symbol {
+            "S" => 1100.0,
+            "T" => 1200.0,
+            _ => 1750.0,
+        },
+        noise_envelope,
     }
 }
 
@@ -241,7 +257,6 @@ pub fn render(plan: &Plan, voice: Voice, sample_rate: u32) -> Result<Audio> {
         Resonator::default(),
         Resonator::default(),
     ];
-    let mut turbulence = Resonator::default();
     let mut pitch_index = 0;
     let f0 = |time: f64, index: &mut usize| {
         let Some(first) = plan.pitch.first() else {
@@ -278,8 +293,10 @@ pub fn render(plan: &Plan, voice: Voice, sample_rate: u32) -> Result<Audio> {
             formants
                 .iter_mut()
                 .for_each(|state| *state = Resonator::default());
-            turbulence = Resonator::default();
         }
+        // Consonants have separate noise sources. A preceding fricative
+        // should not leave filter energy behind a stop closure.
+        let mut turbulence = Resonator::default();
         let start = (phone.start * rate).round() as usize;
         let end = ((phone.end * rate).round() as usize).min(frames);
         let duration = phone.end - phone.start;
@@ -345,17 +362,27 @@ pub fn render(plan: &Plan, voice: Voice, sample_rate: u32) -> Result<Audio> {
             };
             let mut noise = 0.0;
             if shape.noise > 0.0 {
-                let burst = if shape.burst {
-                    smooth((elapsed / duration - 0.48) / 0.18)
-                } else {
-                    1.0
+                let envelope = match shape.noise_envelope {
+                    NoiseEnvelope::Steady => attack * release,
+                    NoiseEnvelope::Ramped => {
+                        attack * release * smooth((elapsed / duration - 0.48) / 0.18)
+                    }
+                    NoiseEnvelope::StopRelease => {
+                        // Keep the closure quiet and cap the release even in a long note.
+                        let length = 0.012_f64.min(duration * 0.4);
+                        let progress = 1.0 - remaining / length;
+                        smooth(progress / 0.18) * smooth((1.0 - progress) / 0.82)
+                    }
                 };
                 noise = shape.noise
-                    * burst
-                    * attack
-                    * release
+                    * envelope
                     * 1.8
-                    * turbulence.next(white, shape.band * voice.formant_scale, 1750., rate);
+                    * turbulence.next(
+                        white,
+                        shape.band * voice.formant_scale,
+                        shape.noise_width,
+                        rate,
+                    );
             }
             let value = voice.gain * (shape.voice * voiced * vocal_attack * vocal_release + noise);
             *sample = value.clamp(-1.0, 1.0) as f32;

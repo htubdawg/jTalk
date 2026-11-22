@@ -95,3 +95,41 @@ fn each_reference_phone_can_be_rendered() {
         );
     }
 }
+
+#[test]
+fn stay_has_a_soft_s_and_a_short_t_release() {
+    let plan = Plan {
+        phones: [("S", 0.0, 0.075), ("T", 0.075, 0.135), ("EY", 0.135, 0.36)]
+            .into_iter()
+            .map(|(symbol, start, end)| Phone {
+                symbol: symbol.to_owned(),
+                start,
+                end,
+            })
+            .collect(),
+        duration: 0.36,
+        ..Plan::default()
+    };
+    for rate in [16_000, 48_000] {
+        let audio = render(&plan, Voice::robot(), rate).unwrap();
+        let rms = |start: f64, end: f64| {
+            let first = (start * f64::from(rate)).round() as usize;
+            let last = (end * f64::from(rate)).round() as usize;
+            let samples = &audio.samples[first..last];
+            (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32)
+                .sqrt()
+        };
+        let vowel = rms(0.165, 0.225);
+        let s = rms(0.012, 0.062);
+        let t_release = rms(0.123, 0.135);
+        assert!(
+            (0.1..0.7).contains(&(s / vowel)),
+            "{rate} Hz: S {s}, vowel {vowel}"
+        );
+        assert_eq!(rms(0.075, 0.123), 0.0, "{rate} Hz: T closure");
+        assert!(
+            (0.08..0.6).contains(&(t_release / vowel)),
+            "{rate} Hz: T {t_release}, vowel {vowel}"
+        );
+    }
+}
