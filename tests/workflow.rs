@@ -192,3 +192,38 @@ fn default_dialogue_breath_is_present_below_voicing() {
     let voice_power: f32 = dry.samples.iter().map(|sample| sample.powi(2)).sum();
     assert!((1e-7..1e-4).contains(&(breath_power / voice_power)));
 }
+
+#[test]
+fn sibilant_preserves_its_band_without_a_strong_high_frequency_tail() {
+    let rate = 48_000;
+    let voice = Voice {
+        breath: 0.35,
+        ..Voice::default()
+    };
+    let plan = plan_speech("Stay", voice, 1.0, &Pronunciations::default()).unwrap();
+    let audio = render(&plan, voice, rate).unwrap();
+    let samples = &audio.samples[576..2880];
+    let band_power = |frequencies: std::ops::Range<usize>| {
+        frequencies
+            .step_by(100)
+            .map(|hz| {
+                let angle = std::f64::consts::TAU * hz as f64 / f64::from(rate);
+                let coefficient = 2.0 * angle.cos();
+                let mut previous = 0.0;
+                let mut older = 0.0;
+                for (i, &sample) in samples.iter().enumerate() {
+                    let t = i as f64 / (samples.len() - 1) as f64;
+                    let window = 0.5 - 0.5 * (std::f64::consts::TAU * t).cos();
+                    let next = f64::from(sample) * window + coefficient * previous - older;
+                    older = previous;
+                    previous = next;
+                }
+                previous * previous + older * older - coefficient * previous * older
+            })
+            .sum::<f64>()
+    };
+    let articulation = band_power(3500..6000);
+    let fizz = band_power(8000..20_000);
+    assert!(articulation > 1.0);
+    assert!(fizz / articulation < 0.01);
+}

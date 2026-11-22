@@ -38,7 +38,7 @@ for (const [id, format] of Object.entries(formats)) {
 form.addEventListener("change", (event) => {
   if (event.target.name !== "preset") return;
   const breath = form.elements.namedItem("breath");
-  breath.value = event.target.value === "robot" ? 0 : 0.035;
+  breath.value = event.target.value === "robot" ? "0" : breath.defaultValue;
   breath.dispatchEvent(new Event("input"));
 });
 

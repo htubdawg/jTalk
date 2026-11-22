@@ -23,12 +23,16 @@ seeded white noise and passes through a one-pole low-pass at 1.4 kHz, using
 `1 - exp(-2π × 1400 / sample_rate)` as the smoothing coefficient. The
 smoothed signal is scaled by the glottal pulse and `Voice::breath`. That
 concentrates the airflow in the open part of the cycle and keeps it out of
-the dry component. The default is 0.035. The robot preset uses zero.
+the dry component. The CLI and library default to 0.035. The browser starts
+at 35% in its Default preset. The robot preset uses zero.
 
 ### Consonant turbulence
 
-Each noisy phone has its own resonator, with a center frequency, bandwidth,
-and gain. The state starts fresh for each phone, so energy from an S cannot
+Each noisy phone has two resonators at the same center frequency. The
+second has twice the bandwidth of the first, so it lowers off-band energy
+further and keeps most of the central band. A gain of 1.7 offsets part of
+the loss from that second stage. Both states start fresh for each phone,
+so energy from an S cannot
 carry into the closure of the following T. The consonant gain has an
 approximate square-root correction for sample rate, referenced to 48 kHz,
 because fixed-width filters pass a smaller fraction of white noise as the
@@ -37,8 +41,8 @@ voice's formant scale.
 
 | Sound | Noise center | Bandwidth | Noise gain | Voicing gain |
 | --- | ---: | ---: | ---: | ---: |
-| S | 5,300 Hz | 1,100 Hz | 0.30 | 0 |
-| T | 3,950 Hz | 1,200 Hz | 0.40 | 0 |
+| S | 4,750 Hz | 1,100 Hz | 0.28 | 0 |
+| T | 3,550 Hz | 1,200 Hz | 0.34 | 0 |
 | TH | 2,650 Hz | 1,200 Hz | 0.16 | 0 |
 | DH | 2,250 Hz | 1,100 Hz | 0.09 | 0.52 |
 
@@ -56,8 +60,8 @@ breath, so it still has the noise needed to articulate these consonants.
 
 ## Verification
 
-Render both demos at the default 48 kHz for a comparison with the preceding
-revision, `ed4c698`:
+The first breath and dental-fricative pass (`7b96cd3`) produced these
+results against `ed4c698` at 48 kHz:
 
 ```sh
 cargo run --release -- sing examples/stay-with-me.musicxml --preset robot -o vocal.wav
@@ -74,6 +78,21 @@ and compare the sum of squared bin magnitudes at or above 3 kHz with
 `10 × log10(new / previous)`. Dialogue RMS across the full band moved
 from 0.0926 to 0.0924. These measurements describe the demo signals.
 Intelligibility and timbre still depend on the line, pitch, and voice.
+
+The second resonator stage was evaluated against `b624a8a` with both
+dialogue renders at 35% breath:
+
+```sh
+cargo run --release -- speak "Stay with me. Can you hear me? The weather is clear. Take the north road. She sees six ships." --breath 0.35 -o dialogue.wav
+```
+
+| Window | Change above 6 kHz | Change above 8 kHz |
+| --- | ---: | ---: |
+| Full dialogue | −14.1 dB | −19.9 dB |
+| Initial S, 0.012–0.060 s | −12.2 dB | −18.5 dB |
+
+The vowel window at 0.160–0.220 s was sample-for-sample identical.
+The same Hann-window and FFT comparison was used for both passes.
 
 ## References
 

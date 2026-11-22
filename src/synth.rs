@@ -118,7 +118,7 @@ fn consonant(symbol: &str) -> Profile {
         "D" => ([230., 1750., 2700.], 0.22, 0.24, 3300., StopRelease),
         "G" => ([230., 1950., 2450.], 0.22, 0.24, 2200., StopRelease),
         "P" => ([300., 900., 2300.], 0.0, 0.30, 1050., StopRelease),
-        "T" => ([300., 1750., 2700.], 0.0, 0.40, 3950., StopRelease),
+        "T" => ([300., 1750., 2700.], 0.0, 0.34, 3550., StopRelease),
         "K" => ([300., 1950., 2450.], 0.0, 0.34, 2450., StopRelease),
         "CH" => ([300., 1750., 2600.], 0.0, 0.40, 3200., Affricate),
         "JH" => ([280., 1750., 2600.], 0.26, 0.33, 3000., Affricate),
@@ -127,8 +127,8 @@ fn consonant(symbol: &str) -> Profile {
         "TH" => ([350., 1450., 2600.], 0.0, 0.16, 2650., Steady),
         "DH" => ([350., 1450., 2600.], 0.52, 0.09, 2250., Steady),
         "HH" => ([400., 1450., 2500.], 0.0, 0.17, 1350., Steady),
-        "S" => ([350., 1850., 2900.], 0.0, 0.30, 5300., Steady),
-        "Z" => ([350., 1850., 2900.], 0.39, 0.30, 4900., Steady),
+        "S" => ([350., 1850., 2900.], 0.0, 0.28, 4750., Steady),
+        "Z" => ([350., 1850., 2900.], 0.39, 0.25, 4400., Steady),
         "SH" => ([350., 1650., 2450.], 0.0, 0.35, 3250., Steady),
         "ZH" => ([350., 1650., 2450.], 0.41, 0.26, 3050., Steady),
         _ => unreachable!("validated phone"),
@@ -300,9 +300,11 @@ pub fn render(plan: &Plan, voice: Voice, sample_rate: u32) -> Result<Audio> {
                 .for_each(|state| *state = Resonator::default());
             breath = 0.0;
         }
-        // Consonants have separate noise sources. A preceding fricative
-        // should not leave filter energy behind a stop closure.
+        // Start each consonant with fresh filters so a fricative cannot
+        // leave energy behind a stop closure.
         let mut turbulence = Resonator::default();
+        let mut turbulence_skirt = Resonator::default();
+        let noise_center = shape.band * voice.formant_scale;
         let start = (phone.start * rate).round() as usize;
         let end = ((phone.end * rate).round() as usize).min(frames);
         let duration = phone.end - phone.start;
@@ -385,15 +387,12 @@ pub fn render(plan: &Plan, voice: Voice, sample_rate: u32) -> Result<Audio> {
                         smooth(progress / 0.18) * smooth((1.0 - progress) / 0.82)
                     }
                 };
-                noise = shape.noise
-                    * envelope
-                    * noise_gain
-                    * turbulence.next(
-                        white,
-                        shape.band * voice.formant_scale,
-                        shape.noise_width,
-                        rate,
-                    );
+                let band = turbulence.next(white, noise_center, shape.noise_width, rate);
+                // A broader second stage suppresses the off-band fizz without
+                // squeezing the useful consonant band into a narrow peak.
+                let shaped =
+                    turbulence_skirt.next(band, noise_center, shape.noise_width * 2.0, rate);
+                noise = shape.noise * envelope * noise_gain * 1.7 * shaped;
             }
             let value = voice.gain * (voicing * voiced + noise);
             *sample = value.clamp(-1.0, 1.0) as f32;
