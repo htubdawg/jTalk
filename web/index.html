@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10141a">
+  <title>jTalk · Text to speech</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main class="workspace">
+    <header class="masthead">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        <span>jTalk</span>
+      </div>
+      <h1>Text to speech</h1>
+    </header>
+
+    <form id="speech" class="layout">
+      <section class="panel editor">
+        <div class="panel-heading">
+          <h2><label for="line">Dialogue</label></h2>
+          <span class="count" id="count">29 / 600</span>
+        </div>
+        <textarea id="line" name="text" rows="6" maxlength="600" required aria-describedby="hint">Stay with me. Can you hear me?</textarea>
+        <p class="hint" id="hint">Punctuation shapes the pauses and pitch.</p>
+        <div class="actions">
+          <button class="render" id="render" type="submit">Render speech</button>
+          <span class="status" id="status" role="status" aria-live="polite"></span>
+        </div>
+
+        <div class="player" id="result" hidden>
+          <div class="panel-heading">
+            <h2>Audio</h2>
+            <a id="download" download="jtalk-dialogue.wav">Download WAV</a>
+          </div>
+          <audio id="audio" aria-label="Rendered dialogue" controls></audio>
+        </div>
+      </section>
+
+      <section class="panel settings">
+        <h2>Voice</h2>
+        <fieldset class="presets">
+          <legend class="screen-reader">Voice preset</legend>
+          <label><input type="radio" name="preset" value="default" checked><span>Default</span></label>
+          <label><input type="radio" name="preset" value="robot"><span>Robot</span></label>
+        </fieldset>
+        <div class="knob">
+          <label for="pitch">Pitch <output id="pitch-value" for="pitch">135 Hz</output></label>
+          <input type="range" id="pitch" name="pitch" min="65" max="320" value="135">
+        </div>
+        <div class="knob">
+          <label for="speed">Speed <output id="speed-value" for="speed">1.00×</output></label>
+          <input type="range" id="speed" name="speed" min="0.5" max="2" value="1" step="0.05">
+        </div>
+        <div class="knob">
+          <label for="formant_scale">Formant scale <output id="formant_scale-value" for="formant_scale">1.00×</output></label>
+          <input type="range" id="formant_scale" name="formant_scale" min="0.65" max="1.45" value="1" step="0.01">
+        </div>
+        <div class="knob">
+          <label for="breath">Breath <output id="breath-value" for="breath">3.5%</output></label>
+          <input type="range" id="breath" name="breath" min="0" max="0.35" value="0.035" step="0.005">
+        </div>
+      </section>
+    </form>
+  </main>
+</body>
+</html>

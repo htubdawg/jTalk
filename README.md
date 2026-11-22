@@ -80,3 +80,15 @@ The pronunciation dictionary and its license are documented in
 
 For the synthesis design, tuning values, and measured demo comparison, see
 [Breath and consonant noise](docs/consonant-noise.md).
+
+## Browser interface
+
+```sh
+cargo run --release -- serve
+```
+
+Open `http://127.0.0.1:8787` in your browser, type a line, and select
+**Render speech**. Adjust pitch, speed, formant scale, or breathiness, then
+render again to hear the change. The player can download the resulting WAV.
+Use `--pronunciations FILE` when starting the server to supply custom words.
+The browser UI handles dialogue. Use the `sing` command for MusicXML vocals.

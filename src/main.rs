@@ -1,5 +1,8 @@
+mod web;
+
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -18,6 +21,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Serve a local browser interface for text to speech.
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        bind: SocketAddr,
+    },
     /// Speak English text.
     Speak {
         text: String,
@@ -116,6 +124,7 @@ fn run(cli: Cli) -> Result<()> {
     };
     let pronunciations = load_overrides(settings.pronunciations.as_deref())?;
     let plan = match cli.command {
+        Command::Serve { bind } => return web::serve(bind, &pronunciations),
         Command::Speak { text, speed } => plan_speech(&text, voice, speed, &pronunciations)?,
         Command::Sing {
             score,
