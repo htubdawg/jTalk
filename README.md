@@ -54,10 +54,15 @@ CMU-style labels, with `AX` for schwa, `LOT` for /ɒ/, and `IA EA UA` for the
 centering diphthongs. Reduced and syllabic variants `IX EL EM EN` are also
 available. British pronunciations can be supplied explicitly.
 
-Use `--pronunciations FILE` for names, alternate pronunciations, or words
-missing from the lexicon. Write one word followed by its phones per line.
-Stress digits are optional. Spell out numerals in dialogue or provide an
-override for them.
+jTalk guesses pronunciations for unfamiliar words and names from their
+spelling using an embedded American English model. This runs offline
+for dialogue and MusicXML lyrics. Unknown tokens that contain digits are
+read character by character. For example, `R2D2` is read as “R two D two.”
+
+Use `--pronunciations FILE` or the Rust `Pronunciations` API to specify an
+exact reading. Each line in the file contains a word and its phones.
+Stress digits are optional. Overrides take precedence over the lexicon
+and the model.
 
 ```text
 jtalk JH EY1 T AO1 K

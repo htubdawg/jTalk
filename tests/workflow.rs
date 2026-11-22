@@ -227,3 +227,43 @@ fn sibilant_preserves_its_band_without_a_strong_high_frequency_tail() {
     assert!(articulation > 1.0);
     assert!(fizz / articulation < 0.01);
 }
+
+#[test]
+fn unknown_words_are_pronounced_and_overrides_take_precedence() {
+    let mut pronunciations = Pronunciations::default();
+    assert_eq!(
+        pronounce("Mythfall", &pronunciations).unwrap(),
+        ["M", "IH", "TH", "F", "AO", "L"]
+    );
+    assert_eq!(
+        pronounce("Vexmora", &pronunciations).unwrap(),
+        ["V", "EH", "K", "S", "M", "AO", "R", "AX"]
+    );
+    assert_eq!(
+        pronounce("RGB", &pronunciations).unwrap(),
+        ["AA", "R", "JH", "IY", "B", "IY"]
+    );
+    assert_eq!(
+        pronounce("R2D2", &pronunciations).unwrap(),
+        ["AA", "R", "T", "UW", "D", "IY", "T", "UW"]
+    );
+    let plan = plan_speech(
+        "Welcome to Mythfall, Vexmora.",
+        Voice::default(),
+        1.0,
+        &pronunciations,
+    )
+    .unwrap();
+    assert_eq!(plan.cues[2].text, "Mythfall");
+    assert_eq!(plan.cues[3].text, "Vexmora");
+    let audio = render(&plan, Voice::default(), 16_000).unwrap();
+    assert!(audio.samples.iter().any(|sample| sample.abs() > 0.02));
+
+    pronunciations
+        .insert("Mythfall", "M IY1 TH F AA2 L")
+        .unwrap();
+    assert_eq!(
+        pronounce("mythfall", &pronunciations).unwrap(),
+        ["M", "IY", "TH", "F", "AA", "L"]
+    );
+}

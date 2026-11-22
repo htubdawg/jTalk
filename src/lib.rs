@@ -1,6 +1,7 @@
 //! Procedural English speech and scored singing with a shared formant renderer.
 
 mod english;
+mod guessing;
 mod musicxml;
 mod synth;
 

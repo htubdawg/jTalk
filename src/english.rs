@@ -1,10 +1,13 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::LazyLock;
 
 use flate2::read::GzDecoder;
 
-use crate::{Cue, PHONE_SYMBOLS, PHONE_VARIANTS, Phone, Pitch, Plan, Result, Voice, invalid};
+use crate::{
+    Cue, PHONE_SYMBOLS, PHONE_VARIANTS, Phone, Pitch, Plan, Result, Voice, guessing, invalid,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Sound {
@@ -81,7 +84,7 @@ pub struct Pronunciations(HashMap<String, Vec<Sound>>);
 impl Pronunciations {
     pub fn insert(&mut self, word: &str, phones: &str) -> Result<()> {
         let key = normalize(word);
-        if !key.chars().any(|c| c.is_ascii_alphanumeric()) || key.chars().any(|c| !is_word(c)) {
+        if !key.chars().any(is_word_base) || key.chars().any(|c| !is_word(c)) {
             return Err(invalid("pronunciation keys must be single words"));
         }
         let phones: Vec<_> = phones
@@ -95,36 +98,92 @@ impl Pronunciations {
         Ok(())
     }
 
-    fn lookup(&self, word: &str) -> Result<&[Vec<Sound>]> {
+    fn lookup(&self, word: &str) -> Option<&[Vec<Sound>]> {
         let key = normalize(word);
         let unquoted = key.trim_matches('\'');
         if let Some(phones) = self.0.get(&key).or_else(|| self.0.get(unquoted)) {
-            return Ok(std::slice::from_ref(phones));
+            return Some(std::slice::from_ref(phones));
         }
         DICTIONARY
             .get(&key)
             .or_else(|| DICTIONARY.get(unquoted))
             .map(Vec::as_slice)
-            .ok_or_else(|| invalid(format!("no pronunciation for {word:?}; add an override")))
+    }
+
+    fn resolve(&self, word: &str) -> Result<Cow<'_, [Sound]>> {
+        if let Some(pronunciations) = self.lookup(word) {
+            return Ok(Cow::Borrowed(&pronunciations[0]));
+        }
+        Ok(Cow::Owned(guess_word(word)?))
     }
 }
 
 fn normalize(text: &str) -> String {
-    text.replace(['’', '‘'], "'").to_ascii_lowercase()
+    text.replace(['’', '‘'], "'").to_lowercase()
+}
+
+fn guess_word(word: &str) -> Result<Vec<Sound>> {
+    let spelling = word.replace(['’', '‘'], "'");
+    let spelling = spelling.trim_matches('\'');
+    let valid = spelling.chars().all(is_word) && spelling.chars().any(is_word_base);
+    if valid {
+        let vowelless = spelling.is_ascii()
+            && !spelling
+                .to_ascii_lowercase()
+                .contains(['a', 'e', 'i', 'o', 'u', 'y']);
+        if !vowelless && let Some(phones) = guessing::guess(spelling)? {
+            return Ok(phones);
+        }
+        if spelling.is_ascii() {
+            return spell_out(spelling);
+        }
+    }
+    Err(invalid(format!(
+        "could not guess a pronunciation for {word:?}; add an override"
+    )))
+}
+
+fn spell_out(spelling: &str) -> Result<Vec<Sound>> {
+    const DIGITS: [&str; 10] = [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    ];
+    let mut phones = Vec::new();
+    for ch in spelling.bytes().filter(u8::is_ascii_alphanumeric) {
+        let letter = [ch.to_ascii_lowercase()];
+        let key = if ch.is_ascii_digit() {
+            DIGITS[usize::from(ch - b'0')]
+        } else {
+            std::str::from_utf8(&letter).expect("ASCII letter")
+        };
+        if key == "a" {
+            phones.push(sound("EY1")?);
+        } else {
+            let variants = DICTIONARY
+                .get(key)
+                .ok_or_else(|| invalid(format!("missing letter or digit name {key:?}")))?;
+            phones.extend_from_slice(&variants[0]);
+        }
+    }
+    Ok(phones)
+}
+
+fn is_word_base(c: char) -> bool {
+    c.is_alphabetic() || c.is_ascii_digit()
 }
 
 fn is_word(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '\'' | '’' | '‘')
+    is_word_base(c) || matches!(c, '\'' | '’' | '‘')
 }
 
 pub(crate) fn words(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c| !is_word(c))
-        .filter(|word| word.bytes().any(|byte| byte.is_ascii_alphanumeric()))
+        .filter(|word| word.chars().any(is_word_base))
 }
 
-/// Resolve a word to phones using an override or the primary CMU pronunciation.
+/// Resolve a word to phones using an override, the CMU lexicon, or an offline guess.
 pub fn pronounce(word: &str, pronunciations: &Pronunciations) -> Result<Vec<&'static str>> {
-    Ok(pronunciations.lookup(word)?[0]
+    Ok(pronunciations
+        .resolve(word)?
         .iter()
         .map(|phone| phone.symbol)
         .collect())
@@ -138,13 +197,44 @@ pub(crate) fn lyric_syllables(
     if spelling.len() == 1 {
         let mut phrase = Vec::new();
         for token in words(word) {
-            phrase.extend_from_slice(&pronunciations.lookup(token)?[0]);
+            phrase.extend_from_slice(&pronunciations.resolve(token)?);
         }
         return Ok(vec![phrase]);
     }
-    let sounds = pronunciations.lookup(word)?.iter()
-        .find(|sounds| sounds.iter().filter(|s| s.is_nucleus()).count() == spelling.len())
-        .ok_or_else(|| invalid(format!("no pronunciation for {word:?} with {} score syllables; check lyric hyphenation or add an override", spelling.len())))?;
+    let matches_score = |sounds: &[Sound]| {
+        sounds.iter().filter(|sound| sound.is_nucleus()).count() == spelling.len()
+    };
+    let syllable_error = || {
+        invalid(format!(
+            "no pronunciation for {word:?} with {} score syllables; check lyric hyphenation or add an override",
+            spelling.len()
+        ))
+    };
+    let sounds = if let Some(variants) = pronunciations.lookup(word) {
+        Cow::Borrowed(
+            variants
+                .iter()
+                .find(|sounds| matches_score(sounds))
+                .ok_or_else(syllable_error)?
+                .as_slice(),
+        )
+    } else {
+        let guess = guess_word(word)?;
+        if !matches_score(&guess) {
+            let syllables = spelling
+                .iter()
+                .map(|part| pronunciations.resolve(part).map(Cow::into_owned))
+                .collect::<Result<Vec<_>>>()?;
+            if syllables
+                .iter()
+                .all(|sounds| sounds.iter().filter(|sound| sound.is_nucleus()).count() == 1)
+            {
+                return Ok(syllables);
+            }
+            return Err(syllable_error());
+        }
+        Cow::Owned(guess)
+    };
 
     let nuclei: Vec<_> = sounds
         .iter()
@@ -295,7 +385,7 @@ pub fn plan_speech(
             continue;
         }
         let phrase = words(&text[start..end])
-            .map(|word| Ok((word, pronunciations.lookup(word)?[0].clone())))
+            .map(|word| Ok((word, pronunciations.resolve(word)?.into_owned())))
             .collect::<Result<Vec<_>>>()?;
         if !phrase.is_empty() {
             add_phrase(&mut plan, &phrase, punctuation, voice.speech_hz, speed);
