@@ -552,28 +552,33 @@ fn add_syllable(
             .sum::<f64>()
             .min(last_length * 0.30)
             .min(0.14);
-        distribute(plan, onset, start, start + lead);
-        distribute(plan, &sounds[first..=last], start + lead, end - tail);
+        // Singers start onset consonants ahead of the beat so the vowel
+        // lands on it. Borrow from a rest or up to half the previous phone.
+        let earliest = plan.phones.last().map_or(0.0, |phone| {
+            if phone.end > start - EPSILON {
+                (phone.start + phone.end) * 0.5
+            } else {
+                phone.end
+            }
+        });
+        let early = (lead * 0.6).min(start - earliest).max(0.0);
+        if let Some(phone) = plan.phones.last_mut()
+            && phone.end > start - early
+        {
+            phone.end = start - early;
+        }
+        let onset_start = start - early;
+        distribute(plan, onset, onset_start, onset_start + lead);
+        distribute(plan, &sounds[first..=last], onset_start + lead, end - tail);
         distribute(plan, coda, end - tail, end);
     } else {
         distribute(plan, sounds, start, end);
     }
-    for (index, note) in syllable.notes.iter().enumerate() {
+    for note in &syllable.notes {
         let time = clock.time(note.start);
         let note_end = clock.time(note.end);
         let hz = midi_hz(note.midi);
-        // Hold each pitch. A short portamento precedes a change inside a melisma.
-        if index > 0 {
-            let previous = &syllable.notes[index - 1];
-            if previous.midi != note.midi {
-                let lead = (time - clock.time(previous.start)) * 0.15;
-                let glide = time - lead.min(0.012);
-                if plan.pitch.last().is_some_and(|target| target.time > glide) {
-                    plan.pitch.pop();
-                }
-                add_pitch(plan, glide, midi_hz(previous.midi));
-            }
-        }
+        // Hold each pitch. `add_pitch` glides into each change of note.
         add_pitch(plan, time, hz);
         add_pitch(plan, note_end, hz);
     }
@@ -584,6 +589,9 @@ fn add_syllable(
     });
     Ok(())
 }
+
+/// Seconds of portamento into each change of note.
+const GLIDE: f64 = 0.05;
 
 fn add_pitch(plan: &mut Plan, time: f64, hz: f64) {
     let previous = plan
@@ -597,9 +605,10 @@ fn add_pitch(plan: &mut Plan, time: f64, hz: f64) {
         if last.hz == hz {
             return;
         }
-        // Preserve the pitch through the end of a preceding syllable.
+        // Hold the previous pitch, then glide into the new note so it
+        // arrives on the beat.
         if let Some(previous) = previous {
-            last.time = (time - 0.0001).max((previous + time) * 0.5);
+            last.time = (time - GLIDE).max((previous + time) * 0.5);
         } else if time > 0.0 {
             last.time = (time - 0.0001).max(0.0);
         } else {

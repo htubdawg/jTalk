@@ -1,4 +1,4 @@
-use std::f64::consts::TAU;
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 use std::io::Write;
 
 use crate::{Cue, PHONE_SYMBOLS, PHONE_VARIANTS, Plan, Result, invalid};
@@ -11,9 +11,12 @@ pub struct Voice {
     pub formant_scale: f64,
     /// Glottal breathiness, independent of consonant turbulence.
     pub breath: f64,
+    /// Per-cycle pitch jitter. Also scales shimmer and slow pitch wander.
     pub jitter_cents: f64,
     pub vibrato_cents: f64,
     pub vibrato_hz: f64,
+    /// Output peak level. Renders are normalized to a peak of 1.12 × gain
+    /// and soft-limited above 0.75.
     pub gain: f64,
 }
 
@@ -64,6 +67,10 @@ struct Profile {
     band: f64,
     noise_width: f64,
     noise_envelope: NoiseEnvelope,
+    /// Aspiration through the vocal tract, used for H.
+    aspiration: f64,
+    /// Nasal anti-resonance in Hz, or zero for an oral sound.
+    nasal: f64,
 }
 
 fn profile(symbol: &str) -> Profile {
@@ -99,6 +106,8 @@ fn profile(symbol: &str) -> Profile {
         band: 0.0,
         noise_width: 0.0,
         noise_envelope: NoiseEnvelope::Steady,
+        aspiration: 0.0,
+        nasal: 0.0,
     }
 }
 
@@ -108,9 +117,9 @@ fn consonant(symbol: &str) -> Profile {
     // Voicing, turbulence and release vary independently by manner of articulation.
     let (first, voice, noise, band, noise_envelope) = match symbol {
         "L" | "EL" => ([360., 1250., 2600.], 0.65, 0.0, 0., Steady),
-        "M" | "EM" => ([250., 1050., 2150.], 0.45, 0.0, 0., Steady),
-        "N" | "EN" => ([280., 1650., 2350.], 0.48, 0.0, 0., Steady),
-        "NG" => ([300., 2050., 2650.], 0.40, 0.0, 0., Steady),
+        "M" | "EM" => ([250., 1050., 2150.], 0.27, 0.0, 0., Steady),
+        "N" | "EN" => ([280., 1650., 2350.], 0.29, 0.0, 0., Steady),
+        "NG" => ([300., 2050., 2650.], 0.24, 0.0, 0., Steady),
         "R" => ([320., 1300., 1640.], 0.76, 0.0, 0., Steady),
         "W" => ([290., 750., 2400.], 0.76, 0.0, 0., Steady),
         "Y" => ([280., 2260., 3000.], 0.76, 0.0, 0., Steady),
@@ -126,7 +135,7 @@ fn consonant(symbol: &str) -> Profile {
         "V" => ([340., 1150., 2450.], 0.42, 0.11, 2400., Steady),
         "TH" => ([350., 1450., 2600.], 0.0, 0.115, 2650., Steady),
         "DH" => ([350., 1450., 2600.], 0.52, 0.065, 2250., Steady),
-        "HH" => ([400., 1450., 2500.], 0.0, 0.12, 1350., Steady),
+        "HH" => ([400., 1450., 2500.], 0.0, 0.0, 0., Steady),
         "S" => ([350., 1850., 2900.], 0.0, 0.135, 4750., Steady),
         "Z" => ([350., 1850., 2900.], 0.39, 0.115, 4400., Steady),
         "SH" => ([350., 1650., 2450.], 0.0, 0.16, 3250., Steady),
@@ -145,6 +154,13 @@ fn consonant(symbol: &str) -> Profile {
             _ => 1750.0,
         },
         noise_envelope,
+        aspiration: if symbol == "HH" { 1.0 } else { 0.0 },
+        nasal: match symbol {
+            "M" | "EM" => 900.0,
+            "N" | "EN" => 1600.0,
+            "NG" => 3000.0,
+            _ => 0.0,
+        },
     }
 }
 
@@ -234,14 +250,78 @@ fn validate(plan: &Plan, voice: Voice, rate: u32) -> Result<()> {
     Ok(())
 }
 
-/// Render mono floating-point PCM. Noise and vocal jitter are deterministic.
+/// Render mono floating-point PCM. Noise and vocal irregularity are deterministic.
 pub fn render(plan: &Plan, voice: Voice, sample_rate: u32) -> Result<Audio> {
     render_voiced(plan, voice, sample_rate, false)
 }
 
-/// Render a sung plan with less direct glottal buzz and stronger vowel formants.
+/// Render a sung plan with delayed vibrato, a singer's formant and less breath.
 pub fn render_singing(plan: &Plan, voice: Voice, sample_rate: u32) -> Result<Audio> {
     render_voiced(plan, voice, sample_rate, true)
+}
+
+/// Klatt-style resonator with unity gain at 0 Hz. In series, these give each
+/// vowel its natural relative formant levels without per-vowel gain tables.
+#[derive(Clone, Copy, Default)]
+struct Pole {
+    last: f64,
+    previous: f64,
+}
+
+/// The matching anti-resonance, used for the nasal zero.
+#[derive(Clone, Copy, Default)]
+struct Zero {
+    last: f64,
+    previous: f64,
+}
+
+fn coefficients(hz: f64, width: f64, rate: f64) -> (f64, f64, f64) {
+    let radius = (-PI * width / rate).exp();
+    let b = 2.0 * radius * (TAU * hz.min(rate * 0.45) / rate).cos();
+    let c = -radius * radius;
+    (1.0 - b - c, b, c)
+}
+
+impl Pole {
+    fn next(&mut self, input: f64, hz: f64, width: f64, rate: f64) -> f64 {
+        let (a, b, c) = coefficients(hz, width, rate);
+        let value = a * input + b * self.last + c * self.previous;
+        self.previous = self.last;
+        self.last = value;
+        value
+    }
+}
+
+impl Zero {
+    fn next(&mut self, input: f64, hz: f64, width: f64, rate: f64) -> f64 {
+        let (a, b, c) = coefficients(hz, width, rate);
+        let value = (input - b * self.last - c * self.previous) / a;
+        self.previous = self.last;
+        self.last = input;
+        value
+    }
+}
+
+/// Oral sounds place the nasal zero on this pole, so the pair cancels out.
+const NASAL_POLE: f64 = 270.0;
+/// Calibrates the vocal tract output against consonant turbulence.
+const TRACT_GAIN: f64 = 0.02;
+/// Level of aspiration noise (H and stop release) entering the vocal tract.
+const ASPIRATION: f64 = 1.8;
+/// Level of glottal breath noise at a Breath setting of 1.
+const BREATH_LEVEL: f64 = 4.2;
+
+/// Formant bandwidths widen with frequency, as in natural speech.
+fn bandwidth(band: usize, hz: f64) -> f64 {
+    match band {
+        0 => 40.0 + 0.06 * hz,
+        1 => 60.0 + 0.03 * hz,
+        _ => 100.0 + 0.03 * hz,
+    }
+}
+
+fn is_voiceless_stop(symbol: &str) -> bool {
+    matches!(symbol, "P" | "T" | "K")
 }
 
 fn render_voiced(plan: &Plan, voice: Voice, sample_rate: u32, singing: bool) -> Result<Audio> {
@@ -253,8 +333,6 @@ fn render_voiced(plan: &Plan, voice: Voice, sample_rate: u32, singing: bool) -> 
         return Err(invalid("render exceeds the 50 million sample limit"));
     }
     let mut samples = vec![0.0; frames];
-    let mut phase = 0.0;
-    let mut period_jitter = 0.0;
     let mut seed = 0x82a2_b175_u32;
     let mut random = || {
         seed ^= seed << 13;
@@ -262,22 +340,48 @@ fn render_voiced(plan: &Plan, voice: Voice, sample_rate: u32, singing: bool) -> 
         seed ^= seed << 5;
         f64::from(seed) / f64::from(u32::MAX) * 2.0 - 1.0
     };
-    let mut formants = [
-        Resonator::default(),
-        Resonator::default(),
-        Resonator::default(),
-    ];
-    let mut breath = 0.0;
+    let follow = |seconds: f64| 1.0 - (-1.0 / (seconds * rate)).exp();
+    let formant_follow = follow(0.012);
+    let nasal_follow = follow(0.018);
+    let pitch_follow = follow(0.015);
     let breath_smoothing = 1.0 - (-TAU * 1400.0 / rate).exp();
-    let mut low_pulse = 0.0;
-    let mut previous_pulse = 0.0;
-    let pulse_smoothing = 1.0 - (-TAU * 460.0 / rate).exp();
-    let closing = if singing { 0.115 } else { 0.23 };
-    let (dry_gain, low_cut, breath_gain, formant_gains, formant_widths) = if singing {
-        (0.025, 0.87, 0.50, [1.55, 1.65, 0.90], [110., 150., 185.])
+
+    // Vocal tract state carries across phone boundaries within a phrase.
+    let mut tract = [Pole::default(); 6];
+    let mut nasal_pole = Pole::default();
+    let mut nasal_zero = Zero::default();
+    let mut formants = [0.0; 3];
+    let mut zero_hz = NASAL_POLE;
+    let mut breath = 0.0;
+    // Glottal source state.
+    let mut phase = 0.0;
+    let mut previous_flow = 0.0;
+    let mut period_jitter = 0.0;
+    let mut shimmer = 1.0;
+    let mut wander = 0.0;
+    let mut smoothed_hz = 0.0;
+    let mut held_hz = 0.0;
+    let mut held = 0.0;
+    let mut vibrato_phase = 0.0;
+    let mut vibrato_hz = voice.vibrato_hz;
+
+    // F4 to F6 are fixed. Singing draws F4 and F5 toward F3, clustering
+    // energy near 3 kHz into a singer's formant. F6 keeps some air above.
+    let upper = if singing {
+        [(2950.0, 180.0), (3400.0, 220.0), (4900.0, 700.0)]
     } else {
-        (0.16, 0.0, 1.0, [1.30, 1.10, 0.72], [80., 120., 165.])
+        [(3300.0, 250.0), (3750.0, 300.0), (4900.0, 700.0)]
     };
+    let breath_gain = BREATH_LEVEL * if singing { 1.25 } else { 1.0 };
+    // A breathier voice keeps the glottis open longer in each cycle.
+    let open_quotient = if singing { 0.5 } else { 0.55 } + 0.2 * voice.breath;
+    let opening = open_quotient * 0.65;
+    // Pressed voices are brighter than breathy ones.
+    let presence = if singing { 1.6 } else { 1.0 } * (1.0 - 0.6 * voice.breath);
+    let presence_follow = 1.0 - (-TAU * 1000.0 / rate).exp();
+    let mut source_low = 0.0;
+    // Jitter also scales shimmer and slow pitch wander; 1.0 at the default.
+    let roughness = voice.jitter_cents / 3.0;
     // Fixed-width filters admit a smaller fraction of white noise at higher rates.
     let noise_gain = 1.8 * (rate / 48_000.0).sqrt();
     let mut pitch_index = 0;
@@ -301,24 +405,46 @@ fn render_voiced(plan: &Plan, voice: Voice, sample_rate: u32, singing: bool) -> 
     };
 
     for (index, phone) in plan.phones.iter().enumerate() {
-        let shape = profile(&phone.symbol);
-        let previous = index
+        let contiguous = |a: &crate::Phone, b: &crate::Phone| (a.end - b.start).abs() < 1e-8;
+        let prior_phone = index
             .checked_sub(1)
-            .and_then(|i| plan.phones.get(i))
-            .filter(|p| (p.end - phone.start).abs() < 1e-8)
-            .map(|p| profile(&p.symbol));
+            .map(|i| &plan.phones[i])
+            .filter(|p| contiguous(p, phone));
+        let previous = prior_phone.map(|p| profile(&p.symbol));
         let next = plan
             .phones
             .get(index + 1)
-            .filter(|p| (p.start - phone.end).abs() < 1e-8)
+            .filter(|p| contiguous(phone, p))
             .map(|p| profile(&p.symbol));
+        let mut shape = profile(&phone.symbol);
+        // H is aspiration shaped by the vocal tract of the following sound.
+        if shape.aspiration > 0.0
+            && let Some(following) = next
+        {
+            shape.first = following.first;
+            shape.last = following.first;
+        }
+        // A voiceless stop releases into aspiration before voicing begins,
+        // except after S, as in "stay".
+        let aspirated = shape.voice > 0.0
+            && prior_phone.is_some_and(|p| is_voiceless_stop(&p.symbol))
+            && !index.checked_sub(2).is_some_and(|i| {
+                plan.phones[i].symbol == "S" && contiguous(&plan.phones[i], &plan.phones[i + 1])
+            });
         if previous.is_none() {
-            formants
-                .iter_mut()
-                .for_each(|state| *state = Resonator::default());
+            tract = [Pole::default(); 6];
+            nasal_pole = Pole::default();
+            nasal_zero = Zero::default();
+            formants = shape.first.map(|hz| hz * voice.formant_scale);
+            zero_hz = if shape.nasal > 0.0 {
+                shape.nasal
+            } else {
+                NASAL_POLE
+            };
             breath = 0.0;
-            low_pulse = 0.0;
-            previous_pulse = 0.0;
+            previous_flow = 0.0;
+            source_low = 0.0;
+            smoothed_hz = 0.0;
         }
         // Start each consonant with fresh filters so a fricative cannot
         // leave energy behind a stop closure.
@@ -328,7 +454,7 @@ fn render_voiced(plan: &Plan, voice: Voice, sample_rate: u32, singing: bool) -> 
         let start = (phone.start * rate).round() as usize;
         let end = ((phone.end * rate).round() as usize).min(frames);
         let duration = phone.end - phone.start;
-        let transition = (duration * 0.3).min(0.025);
+        let voice_onset_time = 0.05_f64.min(duration * 0.4);
         for (frame, sample) in samples.iter_mut().enumerate().take(end).skip(start) {
             let time = frame as f64 / rate;
             let elapsed = (time - phone.start).max(0.0);
@@ -336,59 +462,61 @@ fn render_voiced(plan: &Plan, voice: Voice, sample_rate: u32, singing: bool) -> 
             let tail = smooth(
                 (elapsed - (duration - 0.16).max(duration * 0.42)) / (duration * 0.42).min(0.14),
             );
-            let wobble = voice.vibrato_cents * (TAU * voice.vibrato_hz * time).sin();
-            let hz = f0(time, &mut pitch_index) * 2.0_f64.powf((wobble + period_jitter) / 1200.0);
+
+            // Pitch: the planned contour with rounded corners, then slow
+            // wander, per-cycle jitter and vibrato.
+            let target_hz = f0(time, &mut pitch_index);
+            if (target_hz - held_hz).abs() > target_hz * 1e-9 {
+                held = 0.0;
+                held_hz = target_hz;
+            } else {
+                held += 1.0 / rate;
+            }
+            if smoothed_hz <= 0.0 {
+                smoothed_hz = target_hz;
+            }
+            smoothed_hz *= (target_hz / smoothed_hz).powf(pitch_follow);
+            // Sung vibrato settles in once a note has been held for a moment.
+            let depth = if singing {
+                voice.vibrato_cents * smooth((held - 0.12) / 0.3)
+            } else {
+                voice.vibrato_cents
+            };
+            vibrato_phase += vibrato_hz / rate;
+            if vibrato_phase >= 1.0 {
+                vibrato_phase -= 1.0;
+                vibrato_hz = voice.vibrato_hz * (1.0 + 0.06 * roughness.min(1.0) * random());
+            }
+            // The wander is a slow, mean-reverting walk of about ±9 cents at the default jitter.
+            let cents = depth * (TAU * vibrato_phase).sin()
+                + period_jitter
+                + wander * 2.5 * voice.jitter_cents;
+            let hz = smoothed_hz * 2.0_f64.powf(cents / 1200.0);
             phase += hz / rate;
             if phase >= 1.0 {
                 phase -= 1.0;
                 period_jitter = voice.jitter_cents * random();
+                shimmer = 1.0 + 0.04 * roughness * random();
+                wander = 0.97 * wander + 0.3 * random();
             }
 
-            // A smooth, asymmetric glottal pulse, with a shorter closing phase.
-            let pulse = if phase < 0.40 {
-                0.5 - 0.5 * (std::f64::consts::PI * phase / 0.40).cos()
-            } else if phase < 0.40 + closing {
-                0.5 + 0.5 * (std::f64::consts::PI * (phase - 0.40) / closing).cos()
+            // Glottal flow with a smooth opening and an abrupt closure. Its
+            // derivative includes lip radiation and keeps the high harmonics
+            // that the closure excites.
+            let flow = if phase < opening {
+                0.5 - 0.5 * (PI * phase / opening).cos()
+            } else if phase < open_quotient {
+                (FRAC_PI_2 * (phase - opening) / (open_quotient - opening)).cos()
             } else {
                 0.0
             };
+            let slope = (flow - previous_flow) * rate / hz * shimmer;
+            previous_flow = flow;
+            // A high shelf lifts the source above about 1 kHz for presence.
+            source_low += presence_follow * (slope - source_low);
+            let source = slope + presence * (slope - source_low);
             let white = random();
             breath += breath_smoothing * (white - breath);
-            let source = pulse - (0.40 + closing) * 0.5;
-            low_pulse += pulse_smoothing * (source - low_pulse);
-            // Radiation at the lips favours the changing part of the pulse.
-            // Blend that component in for singing to excite higher formants.
-            let radiation = if singing {
-                (pulse - previous_pulse) * rate / (TAU * 700.0)
-            } else {
-                0.0
-            };
-            previous_pulse = pulse;
-            // Breath follows glottal opening and goes through the vocal tract.
-            let tract_source = source - low_pulse * low_cut
-                + radiation
-                + breath * pulse * voice.breath * breath_gain;
-            let mut voiced = source * dry_gain;
-            for (band, filter) in formants.iter_mut().enumerate() {
-                let target = lerp(shape.first[band], shape.last[band], tail);
-                let mut center = target;
-                if let Some(prior) = previous {
-                    center +=
-                        (prior.last[band] - target) * 0.5 * (1.0 - smooth(elapsed / transition));
-                }
-                if let Some(following) = next {
-                    center += (following.first[band] - target)
-                        * 0.5
-                        * (1.0 - smooth(remaining / transition));
-                }
-                voiced += formant_gains[band]
-                    * filter.next(
-                        tract_source,
-                        center * voice.formant_scale,
-                        formant_widths[band],
-                        rate,
-                    );
-            }
 
             let attack = smooth(elapsed / 0.010_f64.min(duration * 0.27));
             let release = smooth(remaining / 0.014_f64.min(duration * 0.27));
@@ -404,6 +532,38 @@ fn render_voiced(plan: &Plan, voice: Voice, sample_rate: u32, singing: bool) -> 
                 voicing += (1.0 - attack) * (attack_floor - shape.voice)
                     + (1.0 - release) * (release_floor - shape.voice);
             }
+            let mut aspiration = shape.aspiration * attack * release;
+            if aspirated {
+                let onset = smooth(elapsed / voice_onset_time);
+                aspiration += 1.0 - onset;
+                voicing *= onset;
+            }
+            // Breath follows glottal opening and goes through the vocal tract.
+            let excitation = voicing * (source + breath * flow * voice.breath * breath_gain)
+                + aspiration * ASPIRATION * white;
+
+            // Formants glide toward each target, so consonants bend the
+            // neighbouring vowels the way articulators do.
+            for (band, formant) in formants.iter_mut().enumerate() {
+                let target = lerp(shape.first[band], shape.last[band], tail) * voice.formant_scale;
+                *formant += formant_follow * (target - *formant);
+            }
+            let zero_target = if shape.nasal > 0.0 {
+                shape.nasal * voice.formant_scale
+            } else {
+                NASAL_POLE
+            };
+            zero_hz += nasal_follow * (zero_target - zero_hz);
+            let mut tract_out = nasal_zero.next(excitation, zero_hz, 100.0, rate);
+            tract_out = nasal_pole.next(tract_out, NASAL_POLE, 100.0, rate);
+            for (band, filter) in tract.iter_mut().enumerate() {
+                let (hz, width) = match band {
+                    0..3 => (formants[band], bandwidth(band, formants[band])),
+                    _ => (upper[band - 3].0 * voice.formant_scale, upper[band - 3].1),
+                };
+                tract_out = filter.next(tract_out, hz, width, rate);
+            }
+
             let mut noise = 0.0;
             if shape.noise > 0.0 {
                 let envelope = match shape.noise_envelope {
@@ -424,16 +584,42 @@ fn render_voiced(plan: &Plan, voice: Voice, sample_rate: u32, singing: bool) -> 
                 let shaped =
                     turbulence_skirt.next(band, noise_center, shape.noise_width * 2.0, rate);
                 noise = shape.noise * envelope * noise_gain * 1.7 * shaped;
+                // Voiced fricatives pulse with the glottal cycle.
+                if shape.voice > 0.0 {
+                    noise *= 0.5 + 1.6 * flow;
+                }
             }
-            let value = voice.gain * (voicing * voiced + noise);
-            *sample = value.clamp(-1.0, 1.0) as f32;
+            // Fade the tract at the edges of a phrase so its ringing is not cut off.
+            let edge = if previous.is_none() { attack } else { 1.0 }
+                * if next.is_none() { release } else { 1.0 };
+            *sample = (TRACT_GAIN * tract_out * edge + noise) as f32;
         }
     }
+    finish(&mut samples, voice.gain);
     Ok(Audio {
         sample_rate,
         samples,
         cues: plan.cues.clone(),
     })
+}
+
+/// Normalize the peak to the voice gain, then round off anything above a
+/// knee instead of clipping it.
+fn finish(samples: &mut [f32], gain: f64) {
+    let peak = samples.iter().fold(0.0_f32, |peak, s| peak.max(s.abs()));
+    if peak <= 0.0 || !peak.is_finite() {
+        return;
+    }
+    let scale = (gain * 1.12) as f32 / peak;
+    for sample in samples {
+        let value = *sample * scale;
+        let magnitude = value.abs();
+        *sample = if magnitude <= 0.75 {
+            value
+        } else {
+            value.signum() * (0.75 + 0.25 * ((magnitude - 0.75) / 0.25).tanh())
+        };
+    }
 }
 
 /// Write 16-bit mono PCM WAV to a file, buffer, or standard output.

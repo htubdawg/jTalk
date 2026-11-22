@@ -319,6 +319,18 @@ pub(crate) fn distribute(plan: &mut Plan, sounds: &[Sound], start: f64, end: f64
     }
 }
 
+/// Short words that are normally unaccented in running speech.
+const FUNCTION_WORDS: &[&str] = &[
+    "a", "am", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can", "could", "did",
+    "do", "does", "for", "from", "had", "has", "have", "he", "her", "him", "his", "i", "if", "in",
+    "is", "it", "its", "me", "my", "of", "on", "or", "our", "she", "so", "than", "that", "the",
+    "their", "them", "then", "they", "this", "to", "us", "was", "we", "were", "will", "with",
+    "would", "you", "your",
+];
+
+/// Lay out one phrase. Pitch falls gently across the phrase, stressed
+/// syllables of content words carry accents, and the last syllable before
+/// a pause is lengthened. Statements fall at the end; questions rise.
 fn add_phrase(
     plan: &mut Plan,
     phrase: &[(&str, Vec<Sound>)],
@@ -326,40 +338,81 @@ fn add_phrase(
     hz: f64,
     speed: f64,
 ) {
-    let length = phrase.len();
+    let phrase_start = plan.duration;
+    let excited = if punctuation == '!' { 1.10 } else { 1.0 };
+    let mut nuclei = Vec::new();
     for (i, (word, sounds)) in phrase.iter().enumerate() {
         let start = plan.duration;
-        let seconds = sounds.iter().copied().map(weight).sum::<f64>() / speed;
-        let end = start + seconds;
-        let position = i as f64 / length as f64;
+        let function =
+            phrase.len() > 1 && FUNCTION_WORDS.contains(&word.to_ascii_lowercase().as_str());
         let emphasis = if word.len() > 1 && word.chars().all(|c| !c.is_ascii_lowercase()) {
-            1.12
+            1.8
         } else {
             1.0
         };
-        let pitch =
-            hz * (1.12 - 0.20 * position) * emphasis * if punctuation == '!' { 1.10 } else { 1.0 };
-        let final_pitch = pitch
-            * if i + 1 == length && punctuation == '?' {
-                1.32
-            } else {
-                0.93
-            };
-        plan.pitch.push(Pitch {
-            time: start,
-            hz: pitch,
-        });
-        plan.pitch.push(Pitch {
-            time: start + seconds * 0.86,
-            hz: final_pitch,
-        });
-        distribute(plan, sounds, start, end);
+        let final_word = i + 1 == phrase.len();
+        let last_nucleus = sounds.iter().rposition(|sound| sound.is_nucleus());
+        let mut cursor = start;
+        for (j, &sound) in sounds.iter().enumerate() {
+            let mut factor = if function { 0.85 } else { 1.0 };
+            if final_word && let Some(last) = last_nucleus {
+                factor *= match j.cmp(&last) {
+                    std::cmp::Ordering::Equal => 1.35,
+                    std::cmp::Ordering::Greater => 1.2,
+                    std::cmp::Ordering::Less => 1.0,
+                };
+            }
+            let end = cursor + weight(sound) * factor / speed;
+            if sound.is_nucleus() {
+                let accent = match (function, sound.stress) {
+                    (false, 1) => 1.0,
+                    (false, 2) => 0.4,
+                    _ => 0.0,
+                };
+                nuclei.push(((cursor + end) * 0.5, accent * emphasis));
+            }
+            plan.phones.push(Phone {
+                symbol: sound.symbol.to_owned(),
+                start: cursor,
+                end,
+            });
+            cursor = end;
+        }
         plan.cues.push(Cue {
             text: (*word).to_owned(),
             start,
-            end,
+            end: cursor,
         });
-        plan.duration = end + 0.01 / speed;
+        // Words within a phrase join without a pause, as in connected speech.
+        plan.duration = cursor;
+    }
+    let phrase_end = plan.duration;
+    let length = (phrase_end - phrase_start).max(1e-6);
+    let baseline = |time: f64| hz * excited * (1.08 - 0.18 * (time - phrase_start) / length);
+    let question = punctuation == '?';
+    let last_accent = nuclei.iter().rposition(|&(_, accent)| accent >= 1.0);
+    let mut points = vec![(phrase_start, baseline(phrase_start) * 0.97)];
+    for (n, &(time, accent)) in nuclei.iter().enumerate() {
+        let lift = if question && n + 1 == nuclei.len() {
+            // A question dips on its last syllable before rising.
+            -0.05
+        } else if Some(n) == last_accent {
+            0.20 * excited
+        } else {
+            0.12 * accent * excited
+        };
+        points.push((time, baseline(time) * (1.0 + lift)));
+    }
+    let ending = match punctuation {
+        '?' => 1.32,
+        ',' | ';' | ':' | '—' => 1.02,
+        _ => 0.86,
+    };
+    points.push((phrase_end, baseline(phrase_end) * ending));
+    for (time, hz) in points {
+        if plan.pitch.last().is_none_or(|last| time > last.time) {
+            plan.pitch.push(Pitch { time, hz });
+        }
     }
     plan.duration += match punctuation {
         '.' | '?' | '!' => 0.20,

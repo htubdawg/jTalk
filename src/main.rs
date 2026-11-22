@@ -71,7 +71,7 @@ struct Output {
     formant_scale: Option<f64>,
     #[arg(long, global = true)]
     breath: Option<f64>,
-    /// Period-to-period pitch variation, in cents.
+    /// Period-to-period pitch variation, in cents. Also scales shimmer and slow pitch wander.
     #[arg(long, global = true)]
     jitter: Option<f64>,
     /// Vibrato depth in cents.
@@ -79,6 +79,7 @@ struct Output {
     vibrato: Option<f64>,
     #[arg(long, global = true)]
     vibrato_hz: Option<f64>,
+    /// Output peak level; 0.8 peaks near -1 dBFS
     #[arg(long, global = true)]
     gain: Option<f64>,
     /// Text file with one "word PHONE PHONE ..." override per line.

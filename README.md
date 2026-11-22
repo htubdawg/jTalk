@@ -98,7 +98,7 @@ The pronunciation dictionary and its license are documented in
 [data/README.md](data/README.md).
 
 For the synthesis design, tuning values, and measured demo comparison, see
-[Breath and consonant noise](docs/consonant-noise.md).
+[Voice synthesis design](docs/consonant-noise.md).
 
 ## Browser interface
 

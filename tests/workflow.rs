@@ -24,11 +24,18 @@ fn musicxml_melisma_is_one_syllable_with_three_pitches() {
     let stay_phones: Vec<_> = plan
         .phones
         .iter()
-        .filter(|phone| phone.start < stay.end - 1e-8)
+        .filter(|phone| phone.end <= stay.end + 1e-8)
         .map(|phone| phone.symbol.as_str())
         .collect();
     assert_eq!(stay_phones, ["S", "T", "EY"]);
-    for (seconds, expected_hz) in [(0.3, 261.626), (0.9, 293.665), (1.2, 329.628)] {
+    // Each note holds until 50 ms before the next, then glides into it.
+    for (seconds, expected_hz) in [
+        (0.3, 261.626),
+        (0.85, 261.626),
+        (0.9, 293.665),
+        (1.15, 293.665),
+        (1.2, 329.628),
+    ] {
         assert!(plan.pitch.iter().any(|target| {
             (target.time - seconds).abs() < 1e-8 && (target.hz - expected_hz).abs() < 0.001
         }));
@@ -36,7 +43,11 @@ fn musicxml_melisma_is_one_syllable_with_three_pitches() {
 
     let audio = render_singing(&plan, Voice::robot(), 16_000).unwrap();
     assert_eq!(audio.samples.len(), 76_800);
-    assert!(audio.samples[..4800].iter().all(|sample| *sample == 0.0));
+    // The S of "Stay" starts just ahead of the beat at 0.3 s.
+    let onset = plan.phones[0].start;
+    assert!(onset < 0.3 && onset > 0.2, "{onset}");
+    let silent = (onset * 16_000.0) as usize;
+    assert!(audio.samples[..silent].iter().all(|sample| *sample == 0.0));
     let vowel = &audio.samples[9120..12960];
     let harmonic = |hz: f64| {
         let (sin, cos) = vowel
@@ -54,9 +65,15 @@ fn musicxml_melisma_is_one_syllable_with_three_pitches() {
     assert!(harmonic(523.251) > 1.8 * harmonic(261.626));
     for (seconds, hz) in [(0.65, 261.626), (1.0, 293.665), (1.4, 329.628)] {
         let start = (seconds * 16_000.0) as usize;
-        let period = (16_000.0_f64 / hz).round() as usize;
+        // Compare with the signal one exact period later, interpolated.
+        let period = 16_000.0_f64 / hz;
+        let (whole, fraction) = (period as usize, (period.fract()) as f32);
         let error: f32 = (start..start + 800)
-            .map(|i| (audio.samples[i] - audio.samples[i + period]).powi(2))
+            .map(|i| {
+                let later = audio.samples[i + whole] * (1.0 - fraction)
+                    + audio.samples[i + whole + 1] * fraction;
+                (audio.samples[i] - later).powi(2)
+            })
             .sum();
         let power: f32 = audio.samples[start..start + 800]
             .iter()
@@ -168,7 +185,14 @@ fn sung_with_has_a_voiced_dental_without_strong_high_frequency_ripple() {
         .find(|phone| phone.symbol == "DH")
         .unwrap();
     assert_eq!(with.text, "with");
-    assert!((dental.end - with.end).abs() < 1e-8);
+    // The M of "me" is sung slightly ahead of its note, shortening the DH.
+    let m = plan
+        .phones
+        .iter()
+        .find(|phone| phone.symbol == "M")
+        .unwrap();
+    assert!((dental.end - m.start).abs() < 1e-8);
+    assert!(with.end - dental.end < 0.06 && dental.end < with.end);
     let audio = render_singing(&plan, Voice::robot(), 48_000).unwrap();
     let start = ((dental.start + 0.005) * 48_000.0).round() as usize;
     let end = ((dental.end - 0.010) * 48_000.0).round() as usize;
@@ -185,28 +209,40 @@ fn sung_with_has_a_voiced_dental_without_strong_high_frequency_ripple() {
 
 #[test]
 fn default_dialogue_breath_is_present_below_voicing() {
-    let voice = Voice::default();
-    let dry_voice = Voice {
-        breath: 0.0,
-        ..voice
+    // A held vowel at a pitch with an integer period: without breath it
+    // repeats exactly, and breath adds a small aperiodic component.
+    let plan = Plan {
+        phones: vec![Phone {
+            symbol: "AA".to_owned(),
+            start: 0.0,
+            end: 0.5,
+        }],
+        duration: 0.5,
+        ..Plan::default()
     };
-    let plan = plan_speech(
-        "Stay with me. Can you hear me?",
-        voice,
-        1.0,
-        &Pronunciations::default(),
-    )
-    .unwrap();
-    let wet = render(&plan, voice, 48_000).unwrap();
-    let dry = render(&plan, dry_voice, 48_000).unwrap();
-    let breath_power: f32 = wet
-        .samples
-        .iter()
-        .zip(&dry.samples)
-        .map(|(a, b)| (a - b).powi(2))
-        .sum();
-    let voice_power: f32 = dry.samples.iter().map(|sample| sample.powi(2)).sum();
-    assert!((1e-7..1e-4).contains(&(breath_power / voice_power)));
+    let aperiodic = |breath: f64| {
+        let voice = Voice {
+            speech_hz: 125.0,
+            jitter_cents: 0.0,
+            breath,
+            ..Voice::default()
+        };
+        let audio = render(&plan, voice, 48_000).unwrap();
+        let samples = &audio.samples[4800..19_200];
+        let error: f64 = samples
+            .iter()
+            .zip(&samples[384..])
+            .map(|(a, b)| f64::from(a - b).powi(2))
+            .sum();
+        let power: f64 = samples.iter().map(|s| f64::from(s * s)).sum();
+        error / power
+    };
+    let dry = aperiodic(0.0);
+    let default = aperiodic(Voice::default().breath);
+    let desktop = aperiodic(0.73);
+    assert!(dry < 1e-6, "{dry}");
+    assert!(default > 1e-7 && default < 1e-3, "{default}");
+    assert!(desktop > default && desktop < 0.1, "{desktop}");
 }
 
 #[test]
@@ -302,4 +338,40 @@ fn reference_phrase_renders_at_the_desktop_default_breath() {
     let audio = render(&plan, voice, 24_000).unwrap();
     assert!(audio.samples.iter().all(|sample| sample.abs() < 1.0));
     assert!(audio.samples.iter().any(|sample| sample.abs() > 0.02));
+}
+
+#[test]
+fn voiceless_stops_release_into_aspiration() {
+    let syllable = |stop: &str| Plan {
+        phones: [(stop, 0.0, 0.06), ("IY", 0.06, 0.3)]
+            .into_iter()
+            .map(|(symbol, start, end)| Phone {
+                symbol: symbol.to_owned(),
+                start,
+                end,
+            })
+            .collect(),
+        duration: 0.3,
+        ..Plan::default()
+    };
+    // Aperiodic share of the signal just after the release, at a pitch with
+    // a whole-sample period of 384 samples.
+    let aperiodic = |stop: &str| {
+        let voice = Voice {
+            speech_hz: 125.0,
+            ..Voice::robot()
+        };
+        let audio = render(&syllable(stop), voice, 48_000).unwrap();
+        let samples = &audio.samples[3360..4320];
+        let later = &audio.samples[3360 + 384..4320 + 384];
+        let power: f32 = samples.iter().map(|s| s * s).sum();
+        let error: f32 = samples
+            .iter()
+            .zip(later)
+            .map(|(a, b)| (a - b).powi(2))
+            .sum();
+        error / power
+    };
+    let (tea, dee) = (aperiodic("T"), aperiodic("D"));
+    assert!(tea > 0.25 && dee < 0.1, "T {tea}, D {dee}");
 }
