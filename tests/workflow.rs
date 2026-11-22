@@ -232,10 +232,6 @@ fn sibilant_preserves_its_band_without_a_strong_high_frequency_tail() {
 fn unknown_words_are_pronounced_and_overrides_take_precedence() {
     let mut pronunciations = Pronunciations::default();
     assert_eq!(
-        pronounce("Mythfall", &pronunciations).unwrap(),
-        ["M", "IH", "TH", "F", "AO", "L"]
-    );
-    assert_eq!(
         pronounce("Vexmora", &pronunciations).unwrap(),
         ["V", "EH", "K", "S", "M", "AO", "R", "AX"]
     );
@@ -244,26 +240,50 @@ fn unknown_words_are_pronounced_and_overrides_take_precedence() {
         ["AA", "R", "JH", "IY", "B", "IY"]
     );
     assert_eq!(
-        pronounce("R2D2", &pronunciations).unwrap(),
-        ["AA", "R", "T", "UW", "D", "IY", "T", "UW"]
+        pronounce("B7", &pronunciations).unwrap(),
+        ["B", "IY", "S", "EH", "V", "AX", "N"]
     );
     let plan = plan_speech(
-        "Welcome to Mythfall, Vexmora.",
+        "Welcome, Vexmora. Your code is B7.",
         Voice::default(),
         1.0,
         &pronunciations,
     )
     .unwrap();
-    assert_eq!(plan.cues[2].text, "Mythfall");
-    assert_eq!(plan.cues[3].text, "Vexmora");
+    assert_eq!(plan.cues[1].text, "Vexmora");
+    assert_eq!(plan.cues[5].text, "B7");
     let audio = render(&plan, Voice::default(), 16_000).unwrap();
     assert!(audio.samples.iter().any(|sample| sample.abs() > 0.02));
 
     pronunciations
-        .insert("Mythfall", "M IY1 TH F AA2 L")
+        .insert("Vexmora", "V EH1 K S M OW2 R AX")
         .unwrap();
     assert_eq!(
-        pronounce("mythfall", &pronunciations).unwrap(),
-        ["M", "IY", "TH", "F", "AA", "L"]
+        pronounce("vexmora", &pronunciations).unwrap(),
+        ["V", "EH", "K", "S", "M", "OW", "R", "AX"]
     );
+}
+
+#[test]
+fn reference_phrase_renders_at_the_desktop_default_breath() {
+    let phrase = include_str!("../examples/reference-phrase.txt").trim();
+    let voice = Voice {
+        breath: 0.73,
+        ..Voice::default()
+    };
+    let plan = plan_speech(phrase, voice, 1.0, &Pronunciations::default()).unwrap();
+    let words: Vec<_> = plan.cues.iter().map(|cue| cue.text.as_str()).collect();
+    assert_eq!(words.len(), 27);
+    assert_eq!(words.first(), Some(&"The"));
+    assert_eq!(words.last(), Some(&"wanted"));
+    assert_eq!(words.iter().filter(|&&word| word == "loch").count(), 1);
+    for symbol in ["ZH", "SH", "TH", "DH", "NG"] {
+        assert!(
+            plan.phones.iter().any(|phone| phone.symbol == symbol),
+            "{symbol}"
+        );
+    }
+    let audio = render(&plan, voice, 24_000).unwrap();
+    assert!(audio.samples.iter().all(|sample| sample.abs() < 1.0));
+    assert!(audio.samples.iter().any(|sample| sample.abs() > 0.02));
 }

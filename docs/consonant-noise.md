@@ -23,8 +23,8 @@ seeded white noise and passes through a one-pole low-pass at 1.4 kHz, using
 `1 - exp(-2π × 1400 / sample_rate)` as the smoothing coefficient. The
 smoothed signal is scaled by the glottal pulse and `Voice::breath`. That
 concentrates the airflow in the open part of the cycle and keeps it out of
-the dry component. The CLI and library default to 0.035. The browser starts
-at 35% in its Default preset. The robot preset uses zero.
+the dry component. The CLI and library default to 0.035. The browser and Windows app start
+at 73% in their Default presets. The robot preset uses zero.
 
 ### Consonant turbulence
 

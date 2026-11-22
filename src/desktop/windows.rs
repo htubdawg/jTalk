@@ -36,7 +36,7 @@ const SAVE: usize = 105;
 const RENDER_TIMER: usize = 1;
 const TBM_GETPOS: u32 = WM_USER;
 const SAMPLE_RATE: u32 = 48_000;
-const DEFAULT_BREATH: i32 = 35;
+const DEFAULT_BREATH: i32 = 73;
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain([0]).collect()
@@ -155,7 +155,7 @@ impl App {
         self.text = self.control(
             window,
             w!("EDIT"),
-            "Stay with me. Can you hear me?",
+            include_str!("../../examples/reference-phrase.txt").trim(),
             WS_TABSTOP
                 | WS_BORDER
                 | WS_VSCROLL

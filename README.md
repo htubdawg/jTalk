@@ -9,7 +9,8 @@ lyrics. Both use the same formant renderer and work offline.
 Download the [portable Windows app](downloads/jTalk-Windows-x64.zip) for
 Windows 10 or 11 on x64. Extract the ZIP and double-click **jTalk.exe**. Type
 a line, adjust the voice, then select **Render & Play**. Use **Save WAV…** to
-keep the result.
+keep the result. The app starts with the [reference phrase](examples/reference-phrase.txt)
+and 73% breath in the Default preset.
 
 To build it from source on Windows, run `cargo build --release --bin jtalk-desktop`.
 
@@ -57,7 +58,7 @@ available. British pronunciations can be supplied explicitly.
 jTalk guesses pronunciations for unfamiliar words and names from their
 spelling using an embedded American English model. This runs offline
 for dialogue and MusicXML lyrics. Unknown tokens that contain digits are
-read character by character. For example, `R2D2` is read as “R two D two.”
+read character by character. For example, `B7` is read as “B seven.”
 
 Use `--pronunciations FILE` or the Rust `Pronunciations` API to specify an
 exact reading. Each line in the file contains a word and its phones.
@@ -66,7 +67,6 @@ and the model.
 
 ```text
 jtalk JH EY1 T AO1 K
-mythfall M IH1 TH F AO2 L
 ```
 
 ## Embed in a Rust project
