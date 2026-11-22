@@ -2,12 +2,15 @@ use std::cell::RefCell;
 use std::ffi::OsString;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStringExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread;
 
-use jtalk::{Pronunciations, Voice, plan_speech, render, write_wav};
+use jtalk::{
+    Pronunciations, SongLine, SongOptions, Voice, plan_song, plan_speech, render, song_lines,
+    write_wav,
+};
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, CreateFontW, DeleteObject, GetSysColorBrush, HFONT,
@@ -15,7 +18,8 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::Dialogs::{
-    CommDlgExtendedError, GetSaveFileNameW, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OPENFILENAMEW,
+    CommDlgExtendedError, GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
+    OFN_OVERWRITEPROMPT, OPENFILENAMEW,
 };
 use windows_sys::Win32::UI::Controls::{
     EM_SETLIMITTEXT, EM_SETSEL, ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
@@ -25,6 +29,7 @@ use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, SetFocus, VK_CONTROL,
 };
+use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use windows_sys::core::w;
 
@@ -33,6 +38,9 @@ const RENDER: usize = 102;
 const REPLAY: usize = 103;
 const STOP: usize = 104;
 const SAVE: usize = 105;
+const OPEN_SCORE: usize = 106;
+const DIALOGUE: usize = 107;
+const VOCAL_LINE: usize = 108;
 const RENDER_TIMER: usize = 1;
 const TBM_GETPOS: u32 = WM_USER;
 const SAMPLE_RATE: u32 = 48_000;
@@ -68,6 +76,16 @@ impl Slider {
 
 type Rendered = Result<Vec<u8>, String>;
 
+struct Score {
+    path: PathBuf,
+    lines: Vec<SongLine>,
+}
+
+enum Input {
+    Dialogue { text: String, speed: f64 },
+    Score { path: PathBuf, options: SongOptions },
+}
+
 #[derive(Default)]
 struct App {
     instance: HINSTANCE,
@@ -75,6 +93,15 @@ struct App {
     body_font: HFONT,
     heading_font: HFONT,
     text: HWND,
+    heading: HWND,
+    input_label: HWND,
+    drop_hint: HWND,
+    score_name: HWND,
+    vocal_label: HWND,
+    vocal_line: HWND,
+    open_button: HWND,
+    dialogue_button: HWND,
+    score: Option<Score>,
     preset: HWND,
     pitch: Slider,
     speed: Slider,
@@ -149,9 +176,30 @@ impl App {
     fn build(&mut self, window: HWND) {
         self.body_font = font(self.dpi, 15, 400);
         self.heading_font = font(self.dpi, 28, 650);
-        let heading = self.label(window, "Text to speech", [24, 19, 586, 37]);
-        unsafe { SendMessageW(heading, WM_SETFONT, self.heading_font as usize, 1) };
-        self.label(window, "Dialogue", [24, 65, 572, 21]);
+        self.heading = self.label(window, "Text to speech", [24, 19, 312, 37]);
+        unsafe { SendMessageW(self.heading, WM_SETFONT, self.heading_font as usize, 1) };
+        self.open_button = self.control(
+            window,
+            w!("BUTTON"),
+            "Open score…",
+            WS_TABSTOP,
+            OPEN_SCORE,
+            [455, 22, 141, 30],
+        );
+        self.dialogue_button = self.control(
+            window,
+            w!("BUTTON"),
+            "Use dialogue",
+            WS_TABSTOP,
+            DIALOGUE,
+            [345, 22, 100, 30],
+        );
+        self.input_label = self.label(window, "Dialogue", [24, 65, 270, 21]);
+        self.drop_hint = self.label(
+            window,
+            "Drop a MusicXML or MXL file here",
+            [345, 65, 251, 21],
+        );
         self.text = self.control(
             window,
             w!("EDIT"),
@@ -166,6 +214,16 @@ impl App {
             [24, 90, 572, 129],
         );
         unsafe { SendMessageW(self.text, EM_SETLIMITTEXT, 600, 0) };
+        self.score_name = self.label(window, "", [24, 96, 572, 28]);
+        self.vocal_label = self.label(window, "Vocal line", [24, 141, 572, 21]);
+        self.vocal_line = self.control(
+            window,
+            w!("COMBOBOX"),
+            "",
+            WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32,
+            VOCAL_LINE,
+            [24, 165, 572, 180],
+        );
         self.label(window, "Voice preset", [24, 238, 115, 23]);
         self.preset = self.control(
             window,
@@ -217,17 +275,126 @@ impl App {
             [399, 405, 113, 35],
         );
         self.status = self.label(window, "", [24, 454, 572, 55]);
+        self.update_input();
+        unsafe { DragAcceptFiles(window, 1) };
+    }
+
+    fn update_input(&self) {
+        let score_mode = self.score.is_some();
+        set_text(
+            self.heading,
+            if score_mode {
+                "MusicXML vocals"
+            } else {
+                "Text to speech"
+            },
+        );
+        set_text(
+            self.input_label,
+            if score_mode { "Score" } else { "Dialogue" },
+        );
+        unsafe {
+            ShowWindow(self.text, if score_mode { SW_HIDE } else { SW_SHOW });
+            for control in [
+                self.score_name,
+                self.vocal_label,
+                self.vocal_line,
+                self.dialogue_button,
+            ] {
+                ShowWindow(control, if score_mode { SW_SHOW } else { SW_HIDE });
+            }
+            ShowWindow(self.drop_hint, if score_mode { SW_HIDE } else { SW_SHOW });
+            EnableWindow(self.pitch.track, (!score_mode).into());
+            EnableWindow(self.speed.track, (!score_mode).into());
+        }
         self.update_sliders();
         self.update_buttons();
+    }
+
+    fn open_score(&mut self, window: HWND) {
+        match file_dialog(window, FileDialog::OpenScore) {
+            Ok(Some(path)) => self.load_score(path),
+            Ok(None) => {}
+            Err(error) => set_text(self.status, &error),
+        }
+    }
+
+    fn load_score(&mut self, path: PathBuf) {
+        if self.task.is_some() {
+            set_text(self.status, "Wait for the current render to finish.");
+            return;
+        }
+        if !is_score(&path) {
+            set_text(self.status, "Choose a MusicXML, XML, or MXL score.");
+            return;
+        }
+        let mut lines = match song_lines(&path) {
+            Ok(lines) if !lines.is_empty() => lines,
+            Ok(_) => {
+                set_text(self.status, "The score has no embedded lyrics.");
+                return;
+            }
+            Err(error) => {
+                set_text(self.status, &format!("Could not open the score. {error}"));
+                return;
+            }
+        };
+        // Match the planner's preference for verse 1 while keeping the score's line order.
+        let first = &lines[0];
+        if let Some(index) = lines.iter().position(|line| {
+            line.part_id == first.part_id
+                && line.staff == first.staff
+                && line.voice == first.voice
+                && line.verse == "1"
+        }) {
+            lines[..=index].rotate_right(1);
+        }
+        unsafe {
+            SendMessageW(self.vocal_line, CB_RESETCONTENT, 0, 0);
+            for line in &lines {
+                let caption = wide(&format!(
+                    "{} ({}) · staff {} · voice {} · verse {}",
+                    line.part_name, line.part_id, line.staff, line.voice, line.verse
+                ));
+                SendMessageW(self.vocal_line, CB_ADDSTRING, 0, caption.as_ptr() as isize);
+            }
+            SendMessageW(self.vocal_line, CB_SETCURSEL, 0, 0);
+        }
+        if let Some(name) = path.file_name() {
+            set_text(self.score_name, &name.to_string_lossy().replace('&', "&&"));
+        }
+        self.score = Some(Score { path, lines });
+        self.clear_audio();
+        self.update_input();
+        set_text(self.status, "Ready to render the score.");
+        unsafe { SetFocus(self.vocal_line) };
+    }
+
+    fn use_dialogue(&mut self) {
+        self.score = None;
+        self.clear_audio();
+        self.update_input();
+        set_text(self.status, "");
         unsafe { SetFocus(self.text) };
     }
 
+    fn clear_audio(&mut self) {
+        stop_audio();
+        self.wav.clear();
+        self.update_buttons();
+    }
+
     fn update_sliders(&self) {
-        set_text(self.pitch.value, &format!("{} Hz", self.pitch.position()));
-        set_text(
-            self.speed.value,
-            &format!("{:.2}×", f64::from(self.speed.position()) / 100.0),
-        );
+        if self.score.is_some() {
+            set_text(self.pitch.value, "From score");
+            set_text(self.speed.value, "From score");
+        } else {
+            set_text(self.pitch.value, &format!("{} Hz", self.pitch.position()));
+            set_text(
+                self.speed.value,
+                &format!("{:.2}×", f64::from(self.speed.position()) / 100.0),
+            );
+        }
         set_text(
             self.formant.value,
             &format!("{:.2}×", f64::from(self.formant.position()) / 100.0),
@@ -243,6 +410,9 @@ impl App {
             EnableWindow(self.replay_button, has_audio.into());
             EnableWindow(self.stop_button, has_audio.into());
             EnableWindow(self.save_button, has_audio.into());
+            EnableWindow(self.open_button, idle.into());
+            EnableWindow(self.dialogue_button, idle.into());
+            EnableWindow(self.vocal_line, idle.into());
         }
     }
 
@@ -254,14 +424,31 @@ impl App {
         if self.task.is_some() {
             return;
         }
-        let mut buffer = [0u16; 601];
-        let length = unsafe { GetWindowTextW(self.text, buffer.as_mut_ptr(), buffer.len() as i32) };
-        let text = String::from_utf16_lossy(&buffer[..length as usize]);
-        if text.trim().is_empty() {
-            set_text(self.status, "Enter a line of dialogue.");
-            unsafe { SetFocus(self.text) };
-            return;
-        }
+        let input = if let Some(score) = &self.score {
+            let index = unsafe { SendMessageW(self.vocal_line, CB_GETCURSEL, 0, 0) };
+            let Some(line) = score.lines.get(index as usize) else {
+                set_text(self.status, "Choose a vocal line.");
+                return;
+            };
+            Input::Score {
+                path: score.path.clone(),
+                options: line.options(),
+            }
+        } else {
+            let mut buffer = [0u16; 601];
+            let length =
+                unsafe { GetWindowTextW(self.text, buffer.as_mut_ptr(), buffer.len() as i32) };
+            let text = String::from_utf16_lossy(&buffer[..length as usize]);
+            if text.trim().is_empty() {
+                set_text(self.status, "Enter a line of dialogue.");
+                unsafe { SetFocus(self.text) };
+                return;
+            }
+            Input::Dialogue {
+                text,
+                speed: f64::from(self.speed.position()) / 100.0,
+            }
+        };
         let preset = if self.is_robot() {
             Voice::robot()
         } else {
@@ -273,7 +460,6 @@ impl App {
             breath: f64::from(self.breath.position()) / 100.0,
             ..preset
         };
-        let speed = f64::from(self.speed.position()) / 100.0;
         if unsafe { SetTimer(window, RENDER_TIMER, 40, None) } == 0 {
             set_text(self.status, "Could not start the renderer.");
             return;
@@ -281,7 +467,7 @@ impl App {
         stop_audio();
         let (sender, receiver) = channel();
         match thread::Builder::new().spawn(move || {
-            let _ = sender.send(render_wav(&text, voice, speed).map_err(|error| error.to_string()));
+            let _ = sender.send(render_wav(input, voice).map_err(|error| error.to_string()));
         }) {
             Ok(_) => {
                 self.task = Some(receiver);
@@ -344,7 +530,12 @@ impl App {
         if self.wav.is_empty() {
             return;
         }
-        match save_path(window) {
+        let default_name = if self.score.is_some() {
+            "jtalk-vocal.wav"
+        } else {
+            "jtalk-dialogue.wav"
+        };
+        match file_dialog(window, FileDialog::SaveWav(default_name)) {
             Ok(Some(path)) => match std::fs::write(&path, &self.wav) {
                 Ok(()) => set_text(self.status, &format!("Saved {}.", path.display())),
                 Err(error) => set_text(self.status, &format!("Could not save the WAV ({error}).")),
@@ -365,8 +556,12 @@ impl Drop for App {
     }
 }
 
-fn render_wav(text: &str, voice: Voice, speed: f64) -> jtalk::Result<Vec<u8>> {
-    let plan = plan_speech(text, voice, speed, &Pronunciations::default())?;
+fn render_wav(input: Input, voice: Voice) -> jtalk::Result<Vec<u8>> {
+    let pronunciations = Pronunciations::default();
+    let plan = match input {
+        Input::Dialogue { text, speed } => plan_speech(&text, voice, speed, &pronunciations)?,
+        Input::Score { path, options } => plan_song(path, &options, &pronunciations)?,
+    };
     let audio = render(&plan, voice, SAMPLE_RATE)?;
     let mut wav = Vec::new();
     write_wav(&audio, &mut wav)?;
@@ -398,23 +593,66 @@ fn font(dpi: u32, height: i32, weight: i32) -> HFONT {
     }
 }
 
-fn save_path(owner: HWND) -> Result<Option<PathBuf>, String> {
+fn is_score(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| {
+        ["musicxml", "xml", "mxl"]
+            .iter()
+            .any(|format| extension.eq_ignore_ascii_case(format))
+    })
+}
+
+fn dropped_path(drop: HDROP) -> Result<PathBuf, &'static str> {
+    let path = unsafe {
+        if DragQueryFileW(drop, u32::MAX, null_mut(), 0) == 1 {
+            let length = DragQueryFileW(drop, 0, null_mut(), 0);
+            let mut buffer = vec![0u16; length as usize + 1];
+            let copied = DragQueryFileW(drop, 0, buffer.as_mut_ptr(), buffer.len() as u32);
+            (copied > 0).then(|| PathBuf::from(OsString::from_wide(&buffer[..copied as usize])))
+        } else {
+            None
+        }
+    };
+    unsafe { DragFinish(drop) };
+    path.ok_or("Drop one score file at a time.")
+}
+
+enum FileDialog {
+    OpenScore,
+    SaveWav(&'static str),
+}
+
+fn file_dialog(owner: HWND, kind: FileDialog) -> Result<Option<PathBuf>, String> {
     let mut path = [0u16; 32_768];
-    let name = wide("jtalk-dialogue.wav");
-    path[..name.len()].copy_from_slice(&name);
-    let filter = wide("WAV audio\0*.wav\0");
+    let (filter, extension, flags) = match kind {
+        FileDialog::OpenScore => (
+            w!("MusicXML scores\0*.musicxml;*.xml;*.mxl\0"),
+            null(),
+            OFN_FILEMUSTEXIST,
+        ),
+        FileDialog::SaveWav(suggested) => {
+            let name = wide(suggested);
+            path[..name.len()].copy_from_slice(&name);
+            (w!("WAV audio\0*.wav\0"), w!("wav"), OFN_OVERWRITEPROMPT)
+        }
+    };
     let mut dialog = OPENFILENAMEW {
         lStructSize: size_of::<OPENFILENAMEW>() as u32,
         hwndOwner: owner,
-        lpstrFilter: filter.as_ptr(),
+        lpstrFilter: filter,
         nFilterIndex: 1,
         lpstrFile: path.as_mut_ptr(),
         nMaxFile: path.len() as u32,
-        lpstrDefExt: w!("wav"),
-        Flags: OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR,
+        lpstrDefExt: extension,
+        Flags: flags | OFN_NOCHANGEDIR,
         ..Default::default()
     };
-    if unsafe { GetSaveFileNameW(&mut dialog) } != 0 {
+    let selected = unsafe {
+        match kind {
+            FileDialog::OpenScore => GetOpenFileNameW(&mut dialog),
+            FileDialog::SaveWav(_) => GetSaveFileNameW(&mut dialog),
+        }
+    };
+    if selected != 0 {
         let end = path
             .iter()
             .position(|&code| code == 0)
@@ -425,7 +663,7 @@ fn save_path(owner: HWND) -> Result<Option<PathBuf>, String> {
     if error == 0 {
         Ok(None)
     } else {
-        Err(format!("Could not open the save dialog ({error:#x})."))
+        Err(format!("Could not open the file dialog ({error:#x})."))
     }
 }
 
@@ -449,6 +687,18 @@ unsafe extern "system" fn window_proc(
         // run() owns this state for the life of the message loop. Use a checked
         // borrow because Windows may deliver a message during a control call.
         let state = GetWindowLongPtrW(window, GWLP_USERDATA) as *const RefCell<App>;
+        if message == WM_DROPFILES {
+            let path = dropped_path(wparam as HDROP);
+            if let Some(state) = state.as_ref()
+                && let Ok(mut app) = state.try_borrow_mut()
+            {
+                match path {
+                    Ok(path) => app.load_score(path),
+                    Err(error) => set_text(app.status, error),
+                }
+            }
+            return 0;
+        }
         if let Some(state) = state.as_ref()
             && let Ok(mut app) = state.try_borrow_mut()
         {
@@ -464,6 +714,16 @@ unsafe extern "system" fn window_proc(
                             app.breath
                                 .set(if app.is_robot() { 0 } else { DEFAULT_BREATH });
                             app.update_sliders();
+                        }
+                        OPEN_SCORE if notification == BN_CLICKED && app.task.is_none() => {
+                            app.open_score(window)
+                        }
+                        DIALOGUE if notification == BN_CLICKED && app.task.is_none() => {
+                            app.use_dialogue()
+                        }
+                        VOCAL_LINE if notification == CBN_SELCHANGE => {
+                            app.clear_audio();
+                            set_text(app.status, "Ready to render the score.");
                         }
                         RENDER if notification == BN_CLICKED => app.render(window),
                         REPLAY if notification == BN_CLICKED && app.task.is_none() => app.play(),

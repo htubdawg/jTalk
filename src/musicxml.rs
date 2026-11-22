@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -120,12 +121,43 @@ fn verse_id<'a>(lyric: Element<'a, '_>) -> &'a str {
         .unwrap_or("1")
 }
 
-fn select<'a, 'i>(
-    root: Element<'a, 'i>,
-    options: &SongOptions,
-) -> Result<(Element<'a, 'i>, &'a str, &'a str, &'a str)> {
+/// One lyric-bearing part, staff, voice, and verse in a MusicXML score.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SongLine {
+    pub part_id: String,
+    pub part_name: String,
+    pub voice: String,
+    pub staff: String,
+    pub verse: String,
+}
+
+impl SongLine {
+    /// Select this exact line when planning a vocal render.
+    pub fn options(&self) -> SongOptions {
+        SongOptions {
+            part: Some(self.part_id.clone()),
+            verse: Some(self.verse.clone()),
+            voice: Some(self.voice.clone()),
+            staff: Some(self.staff.clone()),
+            ..SongOptions::default()
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct LyricLine<'a, 'i> {
+    part: Element<'a, 'i>,
+    id: &'a str,
+    name: &'a str,
+    voice: &'a str,
+    staff: &'a str,
+    verse: &'a str,
+}
+
+fn lyric_lines<'a, 'i>(root: Element<'a, 'i>) -> Vec<LyricLine<'a, 'i>> {
     let names = child(root, "part-list");
-    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    let mut lines = Vec::new();
     for part in root.children().filter(|&node| named(node, "part")) {
         let id = part.attribute("id").unwrap_or("");
         let name = names
@@ -133,63 +165,91 @@ fn select<'a, 'i>(
                 list.children()
                     .find(|node| node.attribute("id") == Some(id))
             })
-            .and_then(|node| text(node, "part-name"));
-        if options
-            .part
-            .as_deref()
-            .is_some_and(|wanted| wanted != id && Some(wanted) != name)
-        {
-            continue;
-        }
+            .and_then(|node| text(node, "part-name"))
+            .filter(|name| !name.is_empty())
+            .unwrap_or(id);
         for note in part.descendants().filter(|&node| named(node, "note")) {
             let voice = text(note, "voice").unwrap_or("1");
             let staff = text(note, "staff").unwrap_or("1");
-            if options
-                .voice
-                .as_deref()
-                .is_some_and(|wanted| wanted != voice)
-                || options
-                    .staff
-                    .as_deref()
-                    .is_some_and(|wanted| wanted != staff)
-            {
-                continue;
-            }
             for lyric in note
                 .children()
                 .filter(|&node| named(node, "lyric") && child(node, "text").is_some())
             {
-                let verse = verse_id(lyric);
-                let candidate = (part, voice, staff, verse);
-                if options
-                    .verse
-                    .as_deref()
-                    .is_none_or(|wanted| wanted == verse)
-                    && !candidates.contains(&candidate)
-                {
-                    candidates.push(candidate);
+                let line = LyricLine {
+                    part,
+                    id,
+                    name,
+                    voice,
+                    staff,
+                    verse: verse_id(lyric),
+                };
+                if seen.insert(line) {
+                    lines.push(line);
                 }
             }
         }
     }
-    let Some(&(part, voice, staff, first_verse)) = candidates.first() else {
+    lines
+}
+
+/// List the vocal lines available for selection in a MusicXML or MXL score.
+pub fn song_lines(path: impl AsRef<Path>) -> Result<Vec<SongLine>> {
+    let xml = score_xml(path.as_ref())?;
+    let document = score_document(&xml)?;
+    Ok(lyric_lines(document.root_element())
+        .into_iter()
+        .map(|line| SongLine {
+            part_id: line.id.to_owned(),
+            part_name: line.name.to_owned(),
+            voice: line.voice.to_owned(),
+            staff: line.staff.to_owned(),
+            verse: line.verse.to_owned(),
+        })
+        .collect())
+}
+
+fn select<'a, 'i>(root: Element<'a, 'i>, options: &SongOptions) -> Result<LyricLine<'a, 'i>> {
+    let lines = lyric_lines(root);
+    let part_is_id = options
+        .part
+        .as_deref()
+        .is_some_and(|part| lines.iter().any(|line| line.id == part));
+    let mut candidates = lines.into_iter().filter(|line| {
+        options.part.as_deref().is_none_or(|part| {
+            if part_is_id {
+                part == line.id
+            } else {
+                part == line.name
+            }
+        }) && options
+            .voice
+            .as_deref()
+            .is_none_or(|voice| voice == line.voice)
+            && options
+                .staff
+                .as_deref()
+                .is_none_or(|staff| staff == line.staff)
+            && options
+                .verse
+                .as_deref()
+                .is_none_or(|verse| verse == line.verse)
+    });
+    let Some(mut selected) = candidates.next() else {
         return Err(invalid(
             "no embedded lyrics match the selected MusicXML part, staff, voice and verse",
         ));
     };
-    if candidates
-        .iter()
-        .any(|&(p, v, s, _)| (p, v, s) != (part, voice, staff))
-    {
-        return Err(invalid(
-            "multiple lyric-bearing lines; select a MusicXML part, staff or voice",
-        ));
+    for line in candidates {
+        if (line.part, line.voice, line.staff) != (selected.part, selected.voice, selected.staff) {
+            return Err(invalid(
+                "multiple lyric-bearing lines; select a MusicXML part, staff or voice",
+            ));
+        }
+        if line.verse == "1" {
+            selected = line;
+        }
     }
-    let verse = candidates
-        .iter()
-        .find(|candidate| candidate.3 == "1")
-        .map_or(first_verse, |candidate| candidate.3);
-    Ok((part, voice, staff, verse))
+    Ok(selected)
 }
 
 #[derive(Clone)]
@@ -591,6 +651,21 @@ fn schedule(
     Ok(())
 }
 
+fn score_document(xml: &str) -> Result<Document<'_>> {
+    // MusicXML exports may declare a DOCTYPE. roxmltree never fetches external entities.
+    let document = Document::parse_with_options(
+        xml,
+        roxmltree::ParsingOptions {
+            allow_dtd: true,
+            nodes_limit: 1_000_000,
+        },
+    )?;
+    if !named(document.root_element(), "score-partwise") {
+        return Err(invalid("expected a score-partwise MusicXML document"));
+    }
+    Ok(document)
+}
+
 /// Read lyrics and performance timing from a MusicXML or compressed MXL score.
 pub fn plan_song(
     path: impl AsRef<Path>,
@@ -598,19 +673,15 @@ pub fn plan_song(
     pronunciations: &Pronunciations,
 ) -> Result<Plan> {
     let xml = score_xml(path.as_ref())?;
-    // MusicXML exports may declare a DOCTYPE. roxmltree never fetches external entities.
-    let document = Document::parse_with_options(
-        &xml,
-        roxmltree::ParsingOptions {
-            allow_dtd: true,
-            nodes_limit: 1_000_000,
-        },
-    )?;
+    let document = score_document(&xml)?;
     let root = document.root_element();
-    if !named(root, "score-partwise") {
-        return Err(invalid("expected a score-partwise MusicXML document"));
-    }
-    let (part, voice, staff, verse) = select(root, options)?;
+    let LyricLine {
+        part,
+        voice,
+        staff,
+        verse,
+        ..
+    } = select(root, options)?;
     let conductor = root.children().find(|&node| named(node, "part")).unwrap();
     let line = parse_line(part, Some((voice, staff, verse)))?;
     let mut tempos = if conductor != part {

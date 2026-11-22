@@ -1,19 +1,20 @@
 use jtalk::{
     PHONE_SYMBOLS, PHONE_VARIANTS, Phone, Plan, Pronunciations, SongOptions, Voice, plan_song,
-    plan_speech, pronounce, render, write_wav,
+    plan_speech, pronounce, render, song_lines, write_wav,
 };
 
 #[test]
 fn musicxml_melisma_is_one_syllable_with_three_pitches() {
-    let plan = plan_song(
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/examples/stay-with-me.musicxml"
-        ),
-        &SongOptions::default(),
-        &Pronunciations::default(),
-    )
-    .unwrap();
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/stay-with-me.musicxml"
+    );
+    let lines = song_lines(path).unwrap();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].part_id, "P1");
+    assert_eq!(lines[0].part_name, "Voice");
+    assert_eq!(lines[0].verse, "1");
+    let plan = plan_song(path, &lines[0].options(), &Pronunciations::default()).unwrap();
 
     let stay = &plan.cues[0];
     assert_eq!(stay.text, "Stay");

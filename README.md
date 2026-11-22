@@ -12,6 +12,11 @@ a line, adjust the voice, then select **Render & Play**. Use **Save WAV…** to
 keep the result. The app starts with the [reference phrase](examples/reference-phrase.txt)
 and 73% breath in the Default preset.
 
+For singing, drop a MusicXML or MXL file onto the Windows app or select
+**Open score…**. Choose a vocal line if the score has multiple parts or verses
+with lyrics, then select **Render & Play**. The score supplies pitch and timing.
+Select **Use dialogue** to return to the text you were editing.
+
 To build it from source on Windows, run `cargo build --release --bin jtalk-desktop`.
 
 ## Try it
